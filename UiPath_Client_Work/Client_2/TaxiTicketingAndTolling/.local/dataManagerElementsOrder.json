@@ -1,0 +1,36 @@
+{
+  "Workflows": [
+    {
+      "Path": null,
+      "SortBy": 0,
+      "VariablesSectionElementsOrder": [],
+      "ArgumentsSectionElementsOrder": null,
+      "ConstantsSectionElementsOrder": [],
+      "AddedNamespaces": null
+    },
+    {
+      "Path": "Main.xaml",
+      "SortBy": 0,
+      "VariablesSectionElementsOrder": [
+        "BodyText&Sequence_1",
+        "TicketExists&Sequence_1",
+        "ListItemIndex&Sequence_17",
+        "ListItemText&Sequence_17",
+        "MoreExists&Sequence_17",
+        "ViolationText&Sequence_31",
+        "Username&Sequence_39",
+        "Password&Sequence_39",
+        "TollData&Sequence_39",
+        "UserProfilePath&Sequence_39",
+        "UserProfile&Sequence_41",
+        "TaxiData&Sequence_1",
+        "NoMatches&Sequence_16",
+        "TicketInfo&Sequence_7",
+        "MountVernonSummons&Sequence_17"
+      ],
+      "ArgumentsSectionElementsOrder": [],
+      "ConstantsSectionElementsOrder": [],
+      "AddedNamespaces": null
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "assemblyStates": {
+    "Studio.Generated.TypedDataRow2": {
+      "namespace": "System.Data",
+      "providerName": "TypedDataTable",
+      "key": {
+        "name": "Studio.Generated.TypedDataRow2",
+        "hash": "ForEachRowConnections\u00601_1|DataRow|43IHKS376pzpfq6G9p6DUjFkKwwet6THUnlCdcuMMY",
+        "assemblyName": "Studio.Generated.TypedDataRow2"
+      }
+    },
+    "Studio.Generated.TypedDataRow1": {
+      "namespace": "System.Data",
+      "providerName": "TypedDataTable",
+      "key": {
+        "name": "Studio.Generated.TypedDataRow1",
+        "hash": "ForEachRowConnections\u00601_1|DataRow|fdxvMQudf70iKLdtvwWZ6wSrCgTarsvqRZ8XUkkeY",
+        "assemblyName": "Studio.Generated.TypedDataRow1"
+      }
+    },
+    "Studio.Generated.TypedDataRow3": {
+      "namespace": "System.Data",
+      "providerName": "TypedDataTable",
+      "key": {
+        "name": "Studio.Generated.TypedDataRow3",
+        "hash": "ForEachRowConnections\u00601_2|DataRow|fdxvMQudf70iKLdtvwWZ6wSrCgTarsvqRZ8XUkkeY",
+        "assemblyName": "Studio.Generated.TypedDataRow3"
+      }
+    }
+  }
+}

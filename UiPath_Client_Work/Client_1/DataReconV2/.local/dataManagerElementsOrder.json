@@ -1,0 +1,57 @@
+{
+  "Workflows": [
+    {
+      "Path": null,
+      "SortBy": 0,
+      "VariablesSectionElementsOrder": [],
+      "ArgumentsSectionElementsOrder": null,
+      "ConstantsSectionElementsOrder": [],
+      "AddedNamespaces": null
+    },
+    {
+      "Path": "Main.xaml",
+      "SortBy": 0,
+      "VariablesSectionElementsOrder": [
+        "Username&Sequence_1",
+        "Password&Sequence_1",
+        "URL&Sequence_1",
+        "User&Sequence_1",
+        "TestReport1&Sequence_1",
+        "TestReport2&Sequence_1",
+        "UniqueReport1&Sequence_1",
+        "InputData&Sequence_1",
+        "SourcePathArray&Sequence_1",
+        "TargetPathArray&Sequence_1",
+        "CurrentReportName&Sequence_1",
+        "PathName&Sequence_1",
+        "CurrnetIndex&Sequence_1",
+        "TargetParam3&Sequence_1",
+        "TargetParam2&Sequence_1",
+        "TargetParam1&Sequence_1",
+        "SourceParam1&Sequence_1",
+        "SourceParam3&Sequence_1",
+        "SourceParam2&Sequence_1",
+        "CrystalReport&Sequence_1",
+        "UniqueReport2&Sequence_1",
+        "ColumnCount1&Sequence_1",
+        "CurrentDifference&Sequence_1",
+        "Index&Sequence_1",
+        "TableIndex&Sequence_1",
+        "NewDocID&Sequence_1",
+        "CurrentSpreadsheet&Sequence_1",
+        "PromptFound&Sequence_1",
+        "UniqueReport2RowCount&Sequence_1",
+        "ColumnCount2&Sequence_1",
+        "UniqueReport1RowCount&Sequence_1",
+        "FinalReport&Sequence_1",
+        "SourceFolder&Sequence_1",
+        "TargetFolder&Sequence_1",
+        "SourceFileID&Sequence_13",
+        "TargetFileID&Sequence_13"
+      ],
+      "ArgumentsSectionElementsOrder": [],
+      "ConstantsSectionElementsOrder": [],
+      "AddedNamespaces": null
+    }
+  ]
+}
