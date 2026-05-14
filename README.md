@@ -14,19 +14,6 @@ I specialize in **Blue Prism–led implementations** with deep expertise in end-
 
 ---
 
-## What This Repository Contains
-
-This is my private workspace for:
-
-- **Automation Prototypes** — Blue Prism objects, processes, and reusable components
-- **Healthcare-Focused Solutions** — POC builds for claims, eligibility, prior authorization, patient onboarding, and revenue cycle workflows
-- **SQL & Database Integrations** — Scripts for data reconciliation, digital twin generation, and DB cleanup
-- **Solution Design Documents (SDDs), PDDs, and Runbooks** — Templates and case-study artifacts
-- **Scripts & Utilities** — Helper code for credential management, exception handling, and queue orchestration
-- **Learning & Certification Notes** — Study material, Blue Prism patterns, and AWS practitioner notes
-
----
-
 ## Core Competencies
 
 ### Automation & RPA
