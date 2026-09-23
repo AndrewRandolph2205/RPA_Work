@@ -10,7 +10,8 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from .config import Config
 from .journal import Journal
 from .risk import RiskManager
-from .routes import Route, find_cycles, from_usd, optimal_input, pool_liquidity_usd, to_usd, usd_prices
+from .routes import (Route, find_cycles, from_usd, marginal_edge_pct, optimal_input_from,
+                     pool_liquidity_usd, to_usd, usd_prices)
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,15 @@ class Stats:
     realized_net_usd: float = 0.0
     gas_spent_usd: float = 0.0
     simulated_net_usd: float = 0.0
+    # "Closest miss" diagnostics, reset after every summary.
+    best_edge_pct: Optional[float] = None
+    best_edge_route: str = ""
+    best_net_usd: Optional[float] = None
+    best_net_route: str = ""
+
+    def reset_window(self) -> None:
+        self.best_edge_pct, self.best_edge_route = None, ""
+        self.best_net_usd, self.best_net_route = None, ""
 
 
 class FlashBot:
@@ -100,12 +110,20 @@ class FlashBot:
             start = route.start
             max_in = min(self.chain.vault_balances.get(start, 0),
                          from_usd(self.cfg.risk.max_loan_usd, start, prices, dec))
-            amount_in = optimal_input(route, max_in)
+            coeffs = route.mobius()
+            edge = marginal_edge_pct(coeffs)
+            stats = self.stats
+            if edge is not None and (stats.best_edge_pct is None or edge > stats.best_edge_pct):
+                stats.best_edge_pct, stats.best_edge_route = edge, route.describe(self.symbols)
+            amount_in = optimal_input_from(coeffs, max_in)
             if not amount_in:
                 continue
             amount_out = route.amount_out(amount_in)
             profit_usd = to_usd(amount_out - amount_in, start, prices, dec)
-            if profit_usd - gas_usd >= self.cfg.risk.min_profit_usd:
+            net = profit_usd - gas_usd
+            if stats.best_net_usd is None or net > stats.best_net_usd:
+                stats.best_net_usd, stats.best_net_route = net, route.describe(self.symbols)
+            if net >= self.cfg.risk.min_profit_usd:
                 found.append(Opportunity(route, amount_in, amount_out, profit_usd, gas_usd))
         found.sort(key=lambda o: o.net_usd, reverse=True)
         return found
@@ -235,6 +253,14 @@ class FlashBot:
         hours = max((self._clock() - self._started) / 3600, 1e-9)
         lines = [f"mode={self.cfg.mode} blocks={s.blocks} routes={len(self.routes)} "
                  f"candidates={s.candidates}"]
+        if s.best_edge_pct is not None:
+            lines.append(f"  closest this period: best edge after pool fees {s.best_edge_pct:+.4f}% "
+                         f"({s.best_edge_route})")
+        if s.best_net_usd is not None:
+            lines.append(f"  best trade after gas ${s.best_net_usd:+.2f} ({s.best_net_route}); "
+                         f"needs >= ${self.cfg.risk.min_profit_usd:.2f}")
+        else:
+            lines.append("  no route had a positive edge after pool fees this period")
         if self.cfg.mode != "scan":
             lines.append(f"  simulations passed={s.sim_passed} failed={s.sim_failed}")
         if self.cfg.mode == "simulate":
@@ -260,5 +286,6 @@ class FlashBot:
                 break
             if self._clock() - self._last_summary >= self.cfg.summary_interval_s:
                 log.info("summary\n%s", self.summary())
+                self.stats.reset_window()
                 self._last_summary = self._clock()
         log.info("final summary\n%s", self.summary())

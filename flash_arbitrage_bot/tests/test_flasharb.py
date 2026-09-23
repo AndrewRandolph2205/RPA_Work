@@ -163,6 +163,19 @@ class BotTests(unittest.TestCase):
         bot = self.bot("scan", pools=[self.cheap, dear])
         bot.step()
         self.assertEqual(bot.stats.candidates, 0)
+        # The closest miss is still reported: about 0.2% gap minus 0.35% fees.
+        self.assertAlmostEqual(bot.stats.best_edge_pct, -0.15, delta=0.01)
+        self.assertIn("no route had a positive edge", bot.summary())
+
+    def test_summary_reports_best_trade_below_threshold(self):
+        dear = pool("dear", WETH, USDC, 1000 * E18, 2_008_000 * E6)  # small positive edge
+        bot = self.bot("scan", pools=[self.cheap, dear], min_profit_usd=10_000)
+        bot.step()
+        self.assertEqual(bot.stats.candidates, 0)
+        self.assertGreater(bot.stats.best_net_usd, 0)
+        self.assertIn("needs >= $10000.00", bot.summary())
+        bot.stats.reset_window()
+        self.assertIsNone(bot.stats.best_edge_pct)
 
     def test_thin_pools_ignored(self):
         bot = self.bot("scan", min_pool_liquidity_usd=10 ** 9)

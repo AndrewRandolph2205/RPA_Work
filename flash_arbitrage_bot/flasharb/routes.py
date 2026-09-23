@@ -86,7 +86,18 @@ def find_cycles(pools: Iterable[Pool], start_tokens: Iterable[str], max_hops: in
 
 def optimal_input(route: Route, max_input: int) -> Optional[int]:
     """Profit-maximising input amount (raw units), or None if never profitable."""
-    coeffs = route.mobius()
+    return optimal_input_from(route.mobius(), max_input)
+
+
+def marginal_edge_pct(coeffs) -> Optional[float]:
+    """Percent gained on a tiny trade after pool fees (before gas). Negative = losing."""
+    if coeffs is None:
+        return None
+    a, b, _ = coeffs
+    return (a / b - 1) * 100
+
+
+def optimal_input_from(coeffs, max_input: int) -> Optional[int]:
     if coeffs is None:
         return None
     a, b, c = coeffs
