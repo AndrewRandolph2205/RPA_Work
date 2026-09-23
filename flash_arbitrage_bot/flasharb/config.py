@@ -33,6 +33,7 @@ class DexConfig:
     router_kind: str
     fee: int = 3000  # v2 swap fee in parts per million
     fee_tiers: List[int] = field(default_factory=list)  # v3
+    quoter: str = ""  # v3: QuoterV2 address, lets scan mode price trades exactly
 
 
 @dataclass
@@ -95,7 +96,7 @@ def load_config(path: str | Path) -> Config:
     cfg.contract_address = cfg.contract_address.lower()
     cfg.owner_address = cfg.owner_address.lower()
     for dex in cfg.dexes.values():
-        dex.factory, dex.router = dex.factory.lower(), dex.router.lower()
+        dex.factory, dex.router, dex.quoter = dex.factory.lower(), dex.router.lower(), dex.quoter.lower()
     return cfg
 
 
@@ -125,6 +126,8 @@ def validate(cfg: Config) -> None:
             raise ValueError(f"dex {dex.name}: v3 dexes need fee_tiers")
         _check_address(f"dex {dex.name} factory", dex.factory)
         _check_address(f"dex {dex.name} router", dex.router)
+        if dex.quoter:
+            _check_address(f"dex {dex.name} quoter", dex.quoter)
     if cfg.contract_address:
         _check_address("contract_address", cfg.contract_address)
     if cfg.owner_address:

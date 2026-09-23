@@ -43,6 +43,36 @@ class AmmTests(unittest.TestCase):
         self.assertFalse(p.active)
 
 
+class DepthTests(unittest.TestCase):
+    """V3 virtual reserves can claim far more depth than a pool really has."""
+
+    def thin_v3(self):
+        # Price says 1 WETH = 3000 USDC (vs 2000 elsewhere) with big virtual
+        # reserves, but the pool actually holds only ~$50.
+        p = pool("thin", WETH, USDC, 1000 * E18, 3_000_000 * E6, fee=10000, kind="v3")
+        p.balance0, p.balance1 = E18 // 100, 30 * E6
+        return p
+
+    def test_depth_and_output_capped_by_real_balances(self):
+        p = self.thin_v3()
+        self.assertEqual(p.depth(), (E18 // 100, 30 * E6))
+        self.assertEqual(p.amount_out(WETH, 10 * E18), 30 * E6)  # can't pay out more than it holds
+
+    def test_thin_pool_does_not_set_prices(self):
+        deep = pool("deep", WETH, USDC, 1000 * E18, 2_000_000 * E6)
+        prices = usd_prices([self.thin_v3(), deep], DEC, {USDC})
+        self.assertAlmostEqual(prices[WETH], 2000, places=6)
+
+    def test_fake_gap_from_thin_pool_is_filtered(self):
+        deep = pool("deep", WETH, USDC, 1000 * E18, 2_000_000 * E6)
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        bot = FlashBot(cfg, FakeChain([deep, self.thin_v3()]), None, RiskManager(cfg.risk), Journal(tmp))
+        bot.step()
+        self.assertEqual(bot.routes, [])  # thin pool is below min_pool_liquidity_usd
+        self.assertEqual(bot.stats.candidates, 0)
+
+
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.ab1 = pool("ab1", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
@@ -157,6 +187,26 @@ class BotTests(unittest.TestCase):
         rows = self.rows("opportunities.csv")
         self.assertEqual(len({r["route"] for r in rows}), len(rows))  # no repeats
         self.assertTrue(all(float(r["net_usd"]) >= 0.5 for r in rows))
+
+    def test_scan_verifies_candidates_with_quoter(self):
+        chain = FakeChain([self.cheap, self.dear])
+        chain.quote_route = lambda route, amount: (route.amount_out(amount), True)
+        bot = self.bot("scan", chain=chain)
+        bot.step()
+        rows = self.rows("opportunities.csv")
+        self.assertTrue(all(r["decision"].startswith("quoter-verified") for r in rows))
+        self.assertGreater(bot.stats.quoter_verified, 0)
+        self.assertIn("exact quotes: verified=", bot.summary())
+
+    def test_scan_rejects_candidates_the_quoter_disagrees_with(self):
+        chain = FakeChain([self.cheap, self.dear])
+        chain.quote_route = lambda route, amount: (amount * 99 // 100, True)  # real: 1% loss
+        bot = self.bot("scan", chain=chain)
+        bot.step()
+        rows = self.rows("opportunities.csv")
+        self.assertTrue(rows and all(r["decision"].startswith("rejected by quoter") for r in rows))
+        self.assertEqual(bot.stats.quoter_verified, 0)
+        self.assertIn("none real this period", bot.summary())
 
     def test_no_opportunity_when_fees_exceed_gap(self):
         dear = pool("dear", WETH, USDC, 1000 * E18, 2_004_000 * E6)  # 0.2% gap < 0.35% fees

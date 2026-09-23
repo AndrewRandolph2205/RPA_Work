@@ -89,6 +89,7 @@ class Chain:
             raise RuntimeError("no stable token passed verification; profits can't be valued in USD")
         tokens = list(self.decimals)
         self.pools = self._discover_pools(tokens)
+        self.refresh_pool_balances()
         log.info("found %d pools across %d dexes for %d tokens",
                  len(self.pools), len(self.cfg.dexes), len(tokens))
 
@@ -149,8 +150,48 @@ class Chain:
             if int(address, 16) == 0:
                 continue
             pools.append(Pool(address=address, dex=dex.name, kind=dex.type, token0=t0, token1=t1,
-                              fee_ppm=fee, router=dex.router, router_kind=dex.router_kind))
+                              fee_ppm=fee, router=dex.router, router_kind=dex.router_kind,
+                              quoter=dex.quoter if dex.type == "v3" else ""))
         return pools
+
+    def refresh_pool_balances(self) -> None:
+        """Read the tokens each V3 pool actually holds (see Pool.depth)."""
+        v3 = [p for p in self.pools if p.kind == "v3"]
+        balance_of = self.selector("balanceOf(address)")
+        calls = []
+        for pool in v3:
+            owner = self.encode(["address"], [self.cs(pool.address)])
+            calls += [(pool.token0, balance_of + owner), (pool.token1, balance_of + owner)]
+        results = self.call_many(calls)
+        for i, pool in enumerate(v3):
+            b0, b1 = results[2 * i], results[2 * i + 1]
+            pool.balance0 = self.decode(["uint256"], b0)[0] if b0 else 0
+            pool.balance1 = self.decode(["uint256"], b1)[0] if b1 else 0
+
+    def quote_route(self, route, amount_in: int) -> Tuple[int, bool]:
+        """Exact output of a route. V2 hops use the fresh reserves; V3 hops ask the
+        dex's QuoterV2 via eth_call, which walks the real liquidity across price
+        bands. Returns (amount_out, fully_verified); 0 if a quote reverts."""
+        selector = self.selector("quoteExactInputSingle((address,address,uint256,uint24,uint160))")
+        amount, verified = amount_in, True
+        for pool, token_in, token_out in route.hops():
+            if pool.kind == "v2":
+                amount = pool.amount_out(token_in, amount)
+            elif pool.quoter:
+                data = selector + self.encode(
+                    ["(address,address,uint256,uint24,uint160)"],
+                    [(self.cs(token_in), self.cs(token_out), int(amount), pool.fee_ppm, 0)])
+                try:
+                    raw = self.w3.eth.call({"to": self.cs(pool.quoter), "data": data})
+                except Exception:  # e.g. not enough liquidity for this size
+                    return 0, True
+                amount = self.decode(["uint256", "uint160", "uint32", "uint256"], bytes(raw))[0]
+            else:
+                amount = pool.amount_out(token_in, amount)
+                verified = False
+            if amount <= 0:
+                return 0, verified
+        return amount, verified
 
     # ----- per block --------------------------------------------------------
 

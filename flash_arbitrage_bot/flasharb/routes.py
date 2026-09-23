@@ -112,8 +112,10 @@ def usd_prices(pools: Sequence[Pool], decimals: Mapping[str, int], stables: Set[
                 if known not in prices or unknown in prices:
                     continue
                 r_known, r_unknown = pool.reserves_for(known)
-                depth_usd = r_known / 10 ** decimals[known] * prices[known]
-                price = depth_usd / (r_unknown / 10 ** decimals[unknown])
+                d0, d1 = pool.depth()
+                d_known = d0 if known == pool.token0 else d1
+                depth_usd = d_known / 10 ** decimals[known] * prices[known]
+                price = (r_known / 10 ** decimals[known] * prices[known]) / (r_unknown / 10 ** decimals[unknown])
                 if depth_usd > best.get(unknown, (0.0, 0.0))[0]:
                     best[unknown] = (depth_usd, price)
         if not best:
@@ -123,11 +125,12 @@ def usd_prices(pools: Sequence[Pool], decimals: Mapping[str, int], stables: Set[
 
 
 def pool_liquidity_usd(pool: Pool, prices: Mapping[str, float], decimals: Mapping[str, int]) -> float:
-    """USD value of both sides (V3: of the active range's virtual reserves). 0 if unpriced."""
+    """Conservative USD value of both sides (see Pool.depth). 0 if unpriced."""
     if pool.token0 not in prices or pool.token1 not in prices:
         return 0.0
-    return (pool.reserve0 / 10 ** decimals[pool.token0] * prices[pool.token0]
-            + pool.reserve1 / 10 ** decimals[pool.token1] * prices[pool.token1])
+    d0, d1 = pool.depth()
+    return (d0 / 10 ** decimals[pool.token0] * prices[pool.token0]
+            + d1 / 10 ** decimals[pool.token1] * prices[pool.token1])
 
 
 def to_usd(amount_raw: int, token: str, prices: Mapping[str, float], decimals: Mapping[str, int]) -> float:

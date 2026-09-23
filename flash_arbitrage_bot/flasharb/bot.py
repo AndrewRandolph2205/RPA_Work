@@ -43,15 +43,20 @@ class Stats:
     realized_net_usd: float = 0.0
     gas_spent_usd: float = 0.0
     simulated_net_usd: float = 0.0
+    quoter_verified: int = 0
+    quoter_rejected: int = 0
     # "Closest miss" diagnostics, reset after every summary.
     best_edge_pct: Optional[float] = None
     best_edge_route: str = ""
     best_net_usd: Optional[float] = None
     best_net_route: str = ""
     eval_ms_max: float = 0.0
+    best_verified_usd: Optional[float] = None
+    best_verified_route: str = ""
 
     def reset_window(self) -> None:
         self.eval_ms_max = 0.0
+        self.best_verified_usd, self.best_verified_route = None, ""
         self.best_edge_pct, self.best_edge_route = None, ""
         self.best_net_usd, self.best_net_route = None, ""
 
@@ -96,6 +101,9 @@ class FlashBot:
                 if pool_liquidity_usd(p, prices, self.chain.decimals) >= floor}
 
     def build_routes(self) -> None:
+        refresh_balances = getattr(self.chain, "refresh_pool_balances", None)
+        if refresh_balances and self.routes:  # first build: load() just read them
+            refresh_balances()
         prices = self._prices()
         liquid = self._liquid_pools(prices)
         pools = [p for p in self.chain.pools if p.address in liquid]
@@ -244,6 +252,36 @@ class FlashBot:
             net_usd=round(net if res.success else -gas_usd, 4), error=res.error)
         return True
 
+    def _quote_check(self, opp: Opportunity, prices: Dict[str, float]) -> str:
+        """Scan mode: re-price a candidate exactly with the dexes' Quoter contracts
+        (free eth_calls). The fast model assumes V3 liquidity at the current price
+        extends forever; thin pools can make that wildly optimistic."""
+        quote = getattr(self.chain, "quote_route", None)
+        if quote is None:
+            return "scan only (estimate)"
+        dec = self.chain.decimals
+        best_net, best_amount, verified = None, 0, True
+        amount = opp.amount_in
+        for _ in range(3):  # full size, then 1/4 and 1/16 in case depth runs out
+            out, ok = quote(opp.route, amount)
+            verified = verified and ok
+            net = to_usd(out - amount, opp.route.start, prices, dec) - opp.gas_usd
+            if best_net is None or net > best_net:
+                best_net, best_amount = net, amount
+            amount //= 4
+            if amount <= 0:
+                break
+        s = self.stats
+        if best_net >= self.cfg.risk.min_profit_usd:
+            s.quoter_verified += 1
+            if s.best_verified_usd is None or best_net > s.best_verified_usd:
+                s.best_verified_usd = best_net
+                s.best_verified_route = opp.route.describe(self.symbols)
+            tag = "quoter-verified" if verified else "partly verified (dex without quoter)"
+            return f"{tag}: net ${best_net:.2f} at {self._fmt_amount(opp, best_amount)}"
+        s.quoter_rejected += 1
+        return f"rejected by quoter: real net ${best_net:.2f} (estimate was ${opp.net_usd:.2f})"
+
     # ----- loop -------------------------------------------------------------
 
     def step(self) -> bool:
@@ -271,8 +309,8 @@ class FlashBot:
             key = tuple(p.address for p in opp.route.pools) + (opp.route.start,)
             keys.add(key)
             if self.executor is None:
-                if key not in self._prev_logged:  # log an opportunity once while it persists
-                    self._log_opportunity(opp, "scan only")
+                if key not in self._prev_logged:  # check/log an opportunity once while it persists
+                    self._log_opportunity(opp, self._quote_check(opp, prices))
                 continue
             if self._cooldown.get(key, -1) >= block or key in self._open_simulated:
                 continue
@@ -296,10 +334,15 @@ class FlashBot:
             lines.append(f"  closest this period: best edge after pool fees {s.best_edge_pct:+.4f}% "
                          f"({s.best_edge_route})")
         if s.best_net_usd is not None:
-            lines.append(f"  best trade after gas ${s.best_net_usd:+.2f} ({s.best_net_route}); "
+            lines.append(f"  best trade after gas (estimate) ${s.best_net_usd:+.2f} ({s.best_net_route}); "
                          f"needs >= ${self.cfg.risk.min_profit_usd:.2f}")
         else:
             lines.append("  no route had a positive edge after pool fees this period")
+        if self.cfg.mode == "scan" and s.quoter_verified + s.quoter_rejected:
+            best = (f"best ${s.best_verified_usd:.2f} ({s.best_verified_route})"
+                    if s.best_verified_usd is not None else "none real this period")
+            lines.append(f"  exact quotes: verified={s.quoter_verified} "
+                         f"rejected={s.quoter_rejected}; {best}")
         if self.cfg.mode != "scan":
             lines.append(f"  simulations passed={s.sim_passed} failed={s.sim_failed}")
         if self.cfg.mode == "simulate":

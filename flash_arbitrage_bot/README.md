@@ -86,9 +86,23 @@ RPC_URL=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
 python3 run_flash.py run
 ```
 
-It discovers the pools, then logs each gap the math finds to
-`logs/opportunities.csv`. The minute summary shows how many candidates it's
-seeing. Scan mode uses estimates; a candidate here isn't proof of profit yet.
+It discovers the pools, then checks every block for gaps. The fast first pass
+treats each Uniswap V3 pool as if its liquidity at the current price went on
+forever, which can make thin pools look like huge opportunities. So every
+candidate is then re-priced exactly with Uniswap's Quoter contract (a free
+read-only call) before it's logged to `logs/opportunities.csv` as
+`quoter-verified` or `rejected by quoter`. The minute summary shows:
+
+```
+mode=scan blocks=240 routes=2904 candidates=52 slowest_block_eval=7ms
+  closest this period: best edge after pool fees +0.0200% (...)
+  best trade after gas (estimate) $+0.12 (...); needs >= $0.50
+  exact quotes: verified=0 rejected=3; none real this period
+```
+
+Trust the `exact quotes` line. The estimate lines show how close the fast
+pass came. `blocks` should rise by about 240 a minute; far fewer means your
+RPC is rate-limiting you, so get a free Alchemy URL.
 
 ## Stage 2: deploy, self-test, simulate
 

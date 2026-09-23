@@ -12,7 +12,7 @@ before anything is sent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 Q96 = 2 ** 96
 FEE_DENOMINATOR = 1_000_000  # fees are in parts per million: 3000 = 0.30%
@@ -32,6 +32,12 @@ class Pool:
     router_kind: str  # key of ROUTER_KINDS
     reserve0: int = 0
     reserve1: int = 0
+    # Tokens the pool actually holds (V3 only; None until read). V3 virtual
+    # reserves can vastly overstate depth when liquidity sits in a narrow band,
+    # so depth checks use whichever is smaller.
+    balance0: Optional[int] = None
+    balance1: Optional[int] = None
+    quoter: str = ""  # V3: QuoterV2 used to price trades exactly
 
     def __hash__(self) -> int:
         return hash(self.address)
@@ -61,6 +67,12 @@ class Pool:
         self.reserve0 = liquidity * Q96 // sqrt_price_x96
         self.reserve1 = liquidity * sqrt_price_x96 // Q96
 
+    def depth(self) -> Tuple[int, int]:
+        """Conservative (token0, token1) depth for liquidity and pricing decisions."""
+        if self.balance0 is None or self.balance1 is None:
+            return self.reserve0, self.reserve1
+        return min(self.reserve0, self.balance0), min(self.reserve1, self.balance1)
+
     @property
     def active(self) -> bool:
         return self.reserve0 > 0 and self.reserve1 > 0
@@ -71,4 +83,8 @@ class Pool:
         if amount_in <= 0 or r_in <= 0 or r_out <= 0:
             return 0
         with_fee = amount_in * (FEE_DENOMINATOR - self.fee_ppm)
-        return with_fee * r_out // (r_in * FEE_DENOMINATOR + with_fee)
+        out = with_fee * r_out // (r_in * FEE_DENOMINATOR + with_fee)
+        if self.balance0 is not None and self.balance1 is not None:
+            # A pool can never pay out more than it holds.
+            out = min(out, self.balance1 if token_in == self.token0 else self.balance0)
+        return out
