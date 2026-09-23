@@ -1,0 +1,6 @@
+config.toml
+.env
+logs/
+build/
+__pycache__/
+.venv/
