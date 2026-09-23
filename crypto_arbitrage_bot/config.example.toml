@@ -1,0 +1,56 @@
+# Copy to config.toml (git-ignored) and edit.
+#
+# mode:
+#   "scan"  - read public order books and log opportunities. No keys, no trades.
+#   "paper" - simulate trades against real order books with fake balances.
+#   "live"  - REAL MONEY. Also requires the --live flag and API keys in env vars.
+mode = "scan"
+
+# Symbols must be listed under the same name on at least two exchanges.
+symbols = ["BTC/USDT", "ETH/USDT"]
+
+poll_interval_s = 1.0
+order_book_depth = 20
+max_trade_quote = 100.0        # largest single trade, in quote currency (USDT)
+slippage_buffer_pct = 0.05     # extra haircut for the book moving before we fill
+summary_interval_s = 60.0
+log_dir = "logs"
+
+[risk]
+min_profit_pct = 0.15          # net of fees and buffer
+min_profit_quote = 0.10
+min_trade_quote = 10.0
+max_book_age_s = 2.0           # ignore stale order books
+max_daily_loss_quote = 25.0    # stop trading for the day past this loss
+max_trades_per_day = 500
+max_consecutive_failures = 3   # halt the bot after this many failed executions
+
+# Exchange ids are ccxt ids. Live mode reads keys from env vars:
+#   <ID>_API_KEY, <ID>_API_SECRET, and optionally <ID>_API_PASSWORD
+# Set taker_fee to your actual fee tier; otherwise the exchange's reported
+# default (usually the highest tier) is used.
+[exchanges.kraken]
+# taker_fee = 0.0040
+
+[exchanges.coinbase]
+# taker_fee = 0.0060
+
+[exchanges.bitstamp]
+# taker_fee = 0.0040
+
+# Paper mode starting inventory. Arbitrage needs BOTH quote and base on EVERY
+# exchange: you buy with quote on one and sell base you already hold on another.
+[paper_balances.kraken]
+USDT = 500.0
+BTC = 0.005
+ETH = 0.15
+
+[paper_balances.coinbase]
+USDT = 500.0
+BTC = 0.005
+ETH = 0.15
+
+[paper_balances.bitstamp]
+USDT = 500.0
+BTC = 0.005
+ETH = 0.15
