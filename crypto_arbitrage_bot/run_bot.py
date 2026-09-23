@@ -48,6 +48,13 @@ async def main() -> int:
         print(f'--live passed but config mode is "{cfg.mode}". Refusing to trade.')
         return 2
 
+    try:
+        import ccxt  # noqa: F401 - checked here only to give a clear install hint
+    except ModuleNotFoundError:
+        print("The ccxt library isn't installed for this Python. Install it with:\n"
+              f"  {sys.executable} -m pip install ccxt")
+        return 2
+
     hub = ExchangeHub(
         cfg.exchanges,
         use_credentials=cfg.mode == "live",
