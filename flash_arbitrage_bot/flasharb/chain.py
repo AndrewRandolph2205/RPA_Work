@@ -81,15 +81,49 @@ class Chain:
 
     def load(self) -> None:
         self.check_network()
-        tokens = list(self.cfg.tokens.values())
-        results = self.call_many([(t, self.selector("decimals()")) for t in tokens])
-        for symbol, token, data in zip(self.cfg.tokens, tokens, results):
-            if data is None:
-                raise RuntimeError(f"token {symbol} ({token}) did not answer decimals(); wrong address?")
-            self.decimals[token] = self.decode(["uint8"], data)[0]
+        self.decimals = self._verify_tokens()
+        if self.cfg.token(self.cfg.native_wrapped) not in self.decimals:
+            raise RuntimeError(f"{self.cfg.native_wrapped} failed verification; "
+                               "the bot can't value gas without it")
+        if not any(self.cfg.token(s) in self.decimals for s in self.cfg.stable_tokens):
+            raise RuntimeError("no stable token passed verification; profits can't be valued in USD")
+        tokens = list(self.decimals)
         self.pools = self._discover_pools(tokens)
         log.info("found %d pools across %d dexes for %d tokens",
                  len(self.pools), len(self.cfg.dexes), len(tokens))
+
+    def _verify_tokens(self) -> Dict[str, int]:
+        """Ask every configured token for decimals() and symbol().
+
+        Tokens that don't answer decimals() (wrong address, not a token) are
+        skipped with a warning. A symbol that differs from the config name only
+        warns, since some tokens use unusual on-chain symbols (e.g. USDT0)."""
+        entries = list(self.cfg.tokens.items())
+        calls = []
+        for _, token in entries:
+            calls += [(token, self.selector("decimals()")), (token, self.selector("symbol()"))]
+        results = self.call_many(calls)
+        decimals: Dict[str, int] = {}
+        for i, (name, token) in enumerate(entries):
+            dec_data, sym_data = results[2 * i], results[2 * i + 1]
+            if dec_data is None:
+                log.warning("SKIPPING token %s (%s): no decimals() - wrong address?", name, token)
+                continue
+            decimals[token] = self.decode(["uint8"], dec_data)[0]
+            onchain = self._decode_symbol(sym_data)
+            if onchain is not None and onchain.lower() != name.lower():
+                log.warning("token %s (%s) calls itself %r on-chain; check the address if that's "
+                            "not expected", name, token, onchain)
+        log.info("%d of %d tokens verified", len(decimals), len(entries))
+        return decimals
+
+    def _decode_symbol(self, data: Optional[bytes]) -> Optional[str]:
+        if not data:
+            return None
+        try:
+            return self.decode(["string"], data)[0]
+        except Exception:  # a few old tokens return bytes32 instead of string
+            return data[:32].rstrip(b"\0").decode("utf-8", "replace") or None
 
     def _discover_pools(self, tokens: List[str]) -> List[Pool]:
         get_pair = self.selector("getPair(address,address)")

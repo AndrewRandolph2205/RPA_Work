@@ -136,9 +136,13 @@ reverts means others are faster; the bot halts itself after
 
 ## Customising
 
-- **More tokens:** add them under `[tokens]`. Pools between every pair are
-  discovered automatically at startup. More tokens mean more routes but slower
-  blocks; 3-hop routes grow quickly.
+- **Tokens:** the example config watches 29 Arbitrum tokens: stablecoins,
+  BTC, liquid-staked ETH, Arbitrum ecosystem and DeFi tokens. Add or remove
+  lines under `[tokens]`; pools between every pair are discovered at startup.
+  Each token is verified on-chain when the bot starts. Addresses that aren't
+  tokens are skipped with a warning, and a symbol that doesn't match its name
+  is flagged. The summary's `slowest_block_eval` shows how long each block's
+  analysis takes; keep it well under 250ms (about 40,000 routes take ~25ms).
 - **More DEXes:** any Uniswap V2 fork (factory + router) or Uniswap V3 fork
   whose router takes `exactInputSingle`. Set `router_kind` to match the router.
 - **Other EVM chains:** change `chain_id`, the token and DEX addresses, and the

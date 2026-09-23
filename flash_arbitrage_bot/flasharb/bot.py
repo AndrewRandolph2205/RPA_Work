@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from .amm import FEE_DENOMINATOR
 from .config import Config
 from .journal import Journal
 from .risk import RiskManager
-from .routes import (Route, find_cycles, from_usd, marginal_edge_pct, optimal_input_from,
-                     pool_liquidity_usd, to_usd, usd_prices)
+from .routes import (Route, find_cycles, from_usd, optimal_input_from, pool_liquidity_usd, to_usd,
+                     usd_prices)
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +48,10 @@ class Stats:
     best_edge_route: str = ""
     best_net_usd: Optional[float] = None
     best_net_route: str = ""
+    eval_ms_max: float = 0.0
 
     def reset_window(self) -> None:
+        self.eval_ms_max = 0.0
         self.best_edge_pct, self.best_edge_route = None, ""
         self.best_net_usd, self.best_net_route = None, ""
 
@@ -66,6 +70,7 @@ class FlashBot:
         self.stables = {cfg.token(s) for s in cfg.stable_tokens}
         self.flash_tokens = [cfg.token(s) for s in cfg.flash_tokens]
         self.routes: List[Route] = []
+        self._route_keys: List[Tuple] = []
         self.stats = Stats()
         self.last_block: Optional[int] = None
         self.last_sim_failed = False
@@ -95,36 +100,70 @@ class FlashBot:
         liquid = self._liquid_pools(prices)
         pools = [p for p in self.chain.pools if p.address in liquid]
         self.routes = find_cycles(pools, self.flash_tokens, self.cfg.max_hops)
+        # (pool address, token in) per hop, precomputed for the fast pre-filter.
+        self._route_keys = [tuple((p.address, t_in) for p, t_in, _ in r.hops()) for r in self.routes]
         self._routes_built_at = self._clock()
         log.info("%d liquid pools (of %d), %d candidate routes", len(pools),
                  len(self.chain.pools), len(self.routes))
 
+    def _log_rates(self, liquid: Set[str]) -> Dict[Tuple[str, str], float]:
+        """log(marginal rate after fee) for each liquid pool in both directions.
+
+        A route's marginal return is the product of its hop rates, so the sum of
+        their logs says whether a route has any edge at all. Only routes where
+        it's positive get the full sizing math. That keeps every block fast even
+        with tens of thousands of routes."""
+        rates = {}
+        for p in self.chain.pools:
+            if p.address not in liquid or not p.active:
+                continue
+            g = math.log((FEE_DENOMINATOR - p.fee_ppm) / FEE_DENOMINATOR)
+            ratio = math.log(p.reserve1) - math.log(p.reserve0)
+            rates[(p.address, p.token0)] = g + ratio
+            rates[(p.address, p.token1)] = g - ratio
+        return rates
+
     def find_opportunities(self, prices: Dict[str, float], gas_price_wei: int) -> List[Opportunity]:
+        started = time.perf_counter()
         dec = self.chain.decimals
         gas_usd = self.cfg.gas_units_estimate * gas_price_wei / 1e18 * prices.get(self.native, 0.0)
-        liquid = self._liquid_pools(prices)
+        rates = self._log_rates(self._liquid_pools(prices))
+        stats = self.stats
         found = []
-        for route in self.routes:
-            if any(p.address not in liquid for p in route.pools):
+        best_log, best_route = None, None
+        best_net, best_net_route = None, None
+        for route, keys in zip(self.routes, self._route_keys):
+            try:
+                edge_log = sum(rates[k] for k in keys)
+            except KeyError:
+                continue  # a pool on this route is illiquid or inactive right now
+            if best_log is None or edge_log > best_log:
+                best_log, best_route = edge_log, route
+            if edge_log <= 0:
                 continue
             start = route.start
             max_in = min(self.chain.vault_balances.get(start, 0),
                          from_usd(self.cfg.risk.max_loan_usd, start, prices, dec))
-            coeffs = route.mobius()
-            edge = marginal_edge_pct(coeffs)
-            stats = self.stats
-            if edge is not None and (stats.best_edge_pct is None or edge > stats.best_edge_pct):
-                stats.best_edge_pct, stats.best_edge_route = edge, route.describe(self.symbols)
-            amount_in = optimal_input_from(coeffs, max_in)
+            amount_in = optimal_input_from(route.mobius(), max_in)
             if not amount_in:
                 continue
             amount_out = route.amount_out(amount_in)
             profit_usd = to_usd(amount_out - amount_in, start, prices, dec)
             net = profit_usd - gas_usd
-            if stats.best_net_usd is None or net > stats.best_net_usd:
-                stats.best_net_usd, stats.best_net_route = net, route.describe(self.symbols)
+            if best_net is None or net > best_net:
+                best_net, best_net_route = net, route
             if net >= self.cfg.risk.min_profit_usd:
                 found.append(Opportunity(route, amount_in, amount_out, profit_usd, gas_usd))
+
+        # Diagnostics for the summary; routes are described only once per block.
+        if best_log is not None:
+            edge = (math.exp(best_log) - 1) * 100
+            if stats.best_edge_pct is None or edge > stats.best_edge_pct:
+                stats.best_edge_pct, stats.best_edge_route = edge, best_route.describe(self.symbols)
+        if best_net is not None and (stats.best_net_usd is None or best_net > stats.best_net_usd):
+            stats.best_net_usd, stats.best_net_route = best_net, best_net_route.describe(self.symbols)
+        stats.eval_ms_max = max(stats.eval_ms_max, (time.perf_counter() - started) * 1000)
+
         found.sort(key=lambda o: o.net_usd, reverse=True)
         return found
 
@@ -252,7 +291,7 @@ class FlashBot:
         s = self.stats
         hours = max((self._clock() - self._started) / 3600, 1e-9)
         lines = [f"mode={self.cfg.mode} blocks={s.blocks} routes={len(self.routes)} "
-                 f"candidates={s.candidates}"]
+                 f"candidates={s.candidates} slowest_block_eval={s.eval_ms_max:.0f}ms"]
         if s.best_edge_pct is not None:
             lines.append(f"  closest this period: best edge after pool fees {s.best_edge_pct:+.4f}% "
                          f"({s.best_edge_route})")
