@@ -29,7 +29,17 @@ async def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError:
+        print(f"Config file not found: {args.config}\n"
+              "Create one from the example first:\n"
+              "  cp config.example.toml config.toml        (Mac/Linux)\n"
+              "  copy config.example.toml config.toml      (Windows)")
+        return 2
+    except ValueError as exc:
+        print(f"Problem in {args.config}: {exc}")
+        return 2
 
     if cfg.mode == "live" and not args.live:
         print('Config says mode = "live" but --live was not passed. Refusing to trade.')
