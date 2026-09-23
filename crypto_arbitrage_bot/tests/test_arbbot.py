@@ -22,7 +22,7 @@ class FakeHub:
         self.books = books
         self.fees = fees
 
-    async def fetch_books(self, symbol, depth):
+    async def fetch_books(self, symbol):
         return {ex: b for ex, b in self.books.items() if b.symbol == symbol}
 
     def fee(self, ex, symbol):
@@ -158,6 +158,19 @@ class BotTests(unittest.TestCase):
         balances = {"a": {"USDT": 1000, "BTC": 1}, "b": {"USDT": 1000, "BTC": 1}}
         _, _, executed, _ = self._run(books, balances)
         self.assertEqual(executed, [])
+
+    def test_scan_mode_logs_a_persisting_gap_once(self):
+        tmp = tempfile.mkdtemp()
+        cfg = Config(mode="scan", symbols=["BTC/USDT"], exchanges={"a": {}, "b": {}},
+                     max_trade_quote=100, slippage_buffer_pct=0, log_dir=tmp)
+        books = {"a": book("a", [(99, 5)], [(100, 5)]), "b": book("b", [(102, 5)], [(103, 5)])}
+        bot = ArbitrageBot(cfg, FakeHub(books, {"a": 0.001, "b": 0.001}), None,
+                           RiskManager(RiskLimits(min_profit_pct=0.1)), Journal(tmp))
+        for _ in range(3):
+            asyncio.run(bot.run_cycle())
+        with open(f"{tmp}/opportunities.csv") as fh:
+            self.assertEqual(len(list(csv.DictReader(fh))), 1)
+        self.assertEqual(bot.stats["BTC/USDT"].profitable, 3)
 
 
 if __name__ == "__main__":

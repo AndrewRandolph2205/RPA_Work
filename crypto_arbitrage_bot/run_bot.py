@@ -38,7 +38,14 @@ async def main() -> int:
         print(f'--live passed but config mode is "{cfg.mode}". Refusing to trade.')
         return 2
 
-    hub = ExchangeHub(cfg.exchanges, use_credentials=cfg.mode == "live")
+    hub = ExchangeHub(
+        cfg.exchanges,
+        use_credentials=cfg.mode == "live",
+        feed=cfg.price_feed,
+        depth=cfg.order_book_depth,
+        poll_interval_s=cfg.poll_interval_s,
+        min_cycle_interval_s=cfg.min_cycle_interval_s,
+    )
     try:
         await hub.load(cfg.symbols)
         executor = {

@@ -22,6 +22,12 @@ class SymbolStats:
     scans: int = 0
     profitable: int = 0
     best_pct: float = float("-inf")
+    book_age_sum: float = 0.0
+    book_age_n: int = 0
+
+    @property
+    def avg_book_age_ms(self) -> Optional[float]:
+        return self.book_age_sum / self.book_age_n * 1000 if self.book_age_n else None
 
 
 class ArbitrageBot:
@@ -36,10 +42,38 @@ class ArbitrageBot:
         self.trades = 0
         self._started = time.time()
         self._last_summary = self._started
+        self._balances = None
+        self._last_journaled: Dict[str, tuple] = {}
+        self._balances_at = 0.0
+
+    def _journal_once(self, opp: Opportunity, decision: str) -> None:
+        # A streaming feed re-evaluates many times a second; log each distinct
+        # opportunity once rather than on every tick while it persists.
+        key = (opp.buy_exchange, opp.sell_exchange, opp.buy_limit_price,
+               opp.sell_limit_price, round(opp.amount, 8), decision)
+        if self._last_journaled.get(opp.symbol) != key:
+            self._last_journaled[opp.symbol] = key
+            self.journal.opportunity(opp, decision)
+
+    async def _get_balances(self, force: bool = False):
+        # Balance lookups are slow REST calls with rate limits, so they are
+        # cached and only refreshed periodically or after a trade.
+        if self.executor is None:
+            return None
+        if force or self._balances is None or \
+                time.time() - self._balances_at >= self.cfg.balance_refresh_s:
+            self._balances = await self.executor.balances()
+            self._balances_at = time.time()
+        return self._balances
 
     async def _find_best(self, symbol: str, balances) -> Optional[Opportunity]:
-        books = await self.hub.fetch_books(symbol, self.cfg.order_book_depth)
+        books = await self.hub.fetch_books(symbol)
         books = {ex: b for ex, b in books.items() if self.risk.is_fresh(b) and b.bids and b.asks}
+        now = time.time()
+        stats = self.stats[symbol]
+        for b in books.values():
+            stats.book_age_sum += now - b.timestamp
+            stats.book_age_n += 1
         base, quote = symbol.split("/")
         best = None
         for buy_ex, sell_ex in permutations(books, 2):
@@ -66,7 +100,7 @@ class ArbitrageBot:
         return best
 
     async def run_cycle(self) -> List[Opportunity]:
-        balances = await self.executor.balances() if self.executor else None
+        balances = await self._get_balances()
         executed = []
         for symbol in self.cfg.symbols:
             opp = await self._find_best(symbol, balances)
@@ -81,7 +115,7 @@ class ArbitrageBot:
 
             ok, reason = self.risk.allow(opp)
             if not ok or self.executor is None:
-                self.journal.opportunity(opp, reason if not ok else "scan only")
+                self._journal_once(opp, reason if not ok else "scan only")
                 continue
 
             self.journal.opportunity(opp, "execute")
@@ -97,10 +131,11 @@ class ArbitrageBot:
                 log.info("TRADE %s buy %s sell %s amt %.6f pnl %.4f %s", symbol,
                          opp.buy_exchange, opp.sell_exchange, opp.amount,
                          result.realized_pnl, opp.quote)
-                # Balances changed; refresh before looking at the next symbol.
-                balances = await self.executor.balances()
             else:
                 log.warning("execution failed: %s", result.detail)
+            # Balances may have changed (even a failed attempt can partially
+            # fill); refresh before looking at the next symbol.
+            balances = await self._get_balances(force=True)
             if self.risk.halted_reason:
                 break
         return executed
@@ -111,7 +146,9 @@ class ArbitrageBot:
                  f"({self.total_pnl / hours:.4f}/hr)"]
         for symbol, s in self.stats.items():
             best = f"{s.best_pct:.3f}%" if s.best_pct != float("-inf") else "n/a"
-            lines.append(f"  {symbol}: scans={s.scans} profitable={s.profitable} best_net={best}")
+            age = f"{s.avg_book_age_ms:.0f}ms" if s.avg_book_age_ms is not None else "n/a"
+            lines.append(f"  {symbol}: scans={s.scans} profitable={s.profitable} "
+                         f"best_net={best} avg_price_age={age}")
         return "\n".join(lines)
 
     async def run(self, max_cycles: Optional[int] = None) -> None:
@@ -129,5 +166,7 @@ class ArbitrageBot:
             if time.time() - self._last_summary >= self.cfg.summary_interval_s:
                 log.info("summary\n%s", self.summary())
                 self._last_summary = time.time()
-            await asyncio.sleep(max(0.0, self.cfg.poll_interval_s - (time.time() - started)))
+            # REST: sleeps until the next poll. Websocket: wakes on the next
+            # book change, or after poll_interval_s at most as a heartbeat.
+            await self.hub.wait_for_update(max(0.0, self.cfg.poll_interval_s - (time.time() - started)))
         log.info("final summary\n%s", self.summary())

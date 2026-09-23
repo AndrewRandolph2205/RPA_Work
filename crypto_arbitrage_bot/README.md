@@ -24,7 +24,7 @@ exchange and sells on the expensive one at the same time.
 ## How it works
 
 ```
-fetch order books (all exchanges, concurrently)
+stream order books from every exchange (websocket) and wake on any change
   -> drop stale books (> max_book_age_s)
   -> for every (buy exchange, sell exchange) pair:
        size the trade from balances and max_trade_quote
@@ -40,9 +40,31 @@ fetch order books (all exchanges, concurrently)
 | `arbbot/strategy.py` | Opportunity pricing (fees, depth, buffer) and position sizing |
 | `arbbot/risk.py` | Profit thresholds, stale-data guard, daily loss/trade caps, failure halt |
 | `arbbot/executor.py` | `PaperExecutor` (simulated) and `LiveExecutor` (IOC limit orders via ccxt) |
-| `arbbot/market_data.py` | ccxt connectivity, fees, balances, exchange precision rounding |
+| `arbbot/market_data.py` | ccxt connectivity, streaming order books, fees, balances, precision rounding |
 | `arbbot/bot.py` | Main loop and running stats |
 | `arbbot/journal.py` | CSV audit logs |
+
+### Price feed
+
+`price_feed = "websocket"` (the default) keeps a live order book for every
+exchange and symbol in memory through `ccxt.pro`, which ships with `ccxt`.
+The bot reacts as soon as any book changes, typically within milliseconds,
+instead of re-downloading every book once a second. Details:
+
+- Updates are batched to at most one evaluation per `min_cycle_interval_s`
+  (default 50ms) so a busy market can't peg the CPU.
+- Dropped connections reconnect with exponential backoff (1s up to 30s). A
+  feed's cached book is discarded the moment its connection errors, so the bot
+  never trades on a dead connection's prices.
+- Exchanges without websocket order books are polled over REST in the
+  background automatically.
+- Balances are REST-only, so they're cached and re-read every
+  `balance_refresh_s` and after every trade attempt.
+- The minute summary shows `avg_price_age`, the average age of the prices the
+  bot was deciding on. Compare it against `price_feed = "rest"` to see the
+  speed difference on your connection.
+- A book only counts as fresh if it updated within `max_book_age_s`. On a
+  quiet pair that rarely changes, raise that value or the pair will be skipped.
 
 Live orders are **immediate-or-cancel limit orders** priced at the deepest
 book level the simulation used, so a leg can never fill worse than priced. If
@@ -102,6 +124,5 @@ paper-trading cycles. They need no network or third-party packages.
 
 ## Ideas for later
 
-- WebSocket order books (`ccxt.pro`) for lower latency than REST polling
 - Triangular arbitrage within a single exchange (no inventory split needed)
 - Automatic rebalancing alerts when inventory drifts

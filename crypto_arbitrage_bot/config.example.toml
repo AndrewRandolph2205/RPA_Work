@@ -9,7 +9,13 @@ mode = "scan"
 # Symbols must be listed under the same name on at least two exchanges.
 symbols = ["BTC/USDT", "ETH/USDT"]
 
-poll_interval_s = 1.0
+# "websocket": stream order books and react within milliseconds of any change
+#              (exchanges without websocket support are polled automatically).
+# "rest":      request every order book once per poll_interval_s.
+price_feed = "websocket"
+poll_interval_s = 1.0          # REST poll rate; heartbeat in websocket mode
+min_cycle_interval_s = 0.05    # websocket: batch updates, max ~20 evaluations/sec
+balance_refresh_s = 30.0       # balances are re-read this often and after every trade
 order_book_depth = 20
 max_trade_quote = 100.0        # largest single trade, in quote currency (USDT)
 slippage_buffer_pct = 0.05     # extra haircut for the book moving before we fill
