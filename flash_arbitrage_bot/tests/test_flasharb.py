@@ -385,6 +385,24 @@ class ErrorHandlingTests(unittest.TestCase):
         self.assertTrue(any("403" in line for line in logs.output))
 
 
+class TrackingTests(unittest.TestCase):
+    def test_only_route_pools_are_tracked_and_skips_are_counted(self):
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        cheap = pool("cheap", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        dear = pool("dear", WETH, USDC, 1000 * E18, 2_050_000 * E6)
+        lonely = pool("lonely", ARB, USDC, 10 ** 6 * E18, 10 ** 6 * E6)  # on no 2-hop route
+        chain = FakeChain([cheap, dear, lonely])
+        chain.tracked = None
+        bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
+        bot.step()
+        self.assertEqual(chain.tracked, {cheap.address, dear.address})
+        chain.block += 4  # the chain moved on 4 blocks while we were busy
+        bot.step()
+        self.assertEqual(bot.stats.skipped_blocks, 4)
+        self.assertIn("saw 33% of chain blocks", bot.summary())
+
+
 class ConfigTests(unittest.TestCase):
     def test_rejects_bad_address_and_unknown_symbol(self):
         cfg = make_config("scan", tempfile.mkdtemp())

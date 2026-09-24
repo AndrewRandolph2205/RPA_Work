@@ -35,6 +35,7 @@ class Opportunity:
 @dataclass
 class Stats:
     blocks: int = 0
+    skipped_blocks: int = 0  # chain blocks that passed while we were busy
     candidates: int = 0
     sim_passed: int = 0
     sim_failed: int = 0
@@ -102,15 +103,22 @@ class FlashBot:
                 if pool_liquidity_usd(p, prices, self.chain.decimals) >= floor}
 
     def build_routes(self) -> None:
-        refresh_balances = getattr(self.chain, "refresh_pool_balances", None)
-        if refresh_balances and self.routes:  # first build: load() just read them
-            refresh_balances()
+        if self.routes:  # rebuild: untracked pools are stale, re-read everything
+            refresh_all = getattr(self.chain, "refresh_all", None)
+            if refresh_all:
+                refresh_all()
+            refresh_balances = getattr(self.chain, "refresh_pool_balances", None)
+            if refresh_balances:  # first build: load() just read them
+                refresh_balances()
         prices = self._prices()
         liquid = self._liquid_pools(prices)
         pools = [p for p in self.chain.pools if p.address in liquid]
         self.routes = find_cycles(pools, self.flash_tokens, self.cfg.max_hops)
         # (pool address, token in) per hop, precomputed for the fast pre-filter.
         self._route_keys = [tuple((p.address, t_in) for p, t_in, _ in r.hops()) for r in self.routes]
+        if hasattr(self.chain, "tracked"):
+            # From now on only pools on some route are re-read every block.
+            self.chain.tracked = {p.address for r in self.routes for p in r.pools}
         self._routes_built_at = self._clock()
         log.info("%d liquid pools (of %d), %d candidate routes", len(pools),
                  len(self.chain.pools), len(self.routes))
@@ -291,6 +299,8 @@ class FlashBot:
         block = self.chain.refresh()
         if block == self.last_block:
             return False
+        if self.last_block is not None and block > self.last_block + 1:
+            self.stats.skipped_blocks += block - self.last_block - 1
         self.last_block = block
         self.stats.blocks += 1
 
@@ -330,7 +340,9 @@ class FlashBot:
     def summary(self) -> str:
         s = self.stats
         hours = max((self._clock() - self._started) / 3600, 1e-9)
-        lines = [f"mode={self.cfg.mode} blocks={s.blocks} routes={len(self.routes)} "
+        total = s.blocks + s.skipped_blocks
+        seen = f" (saw {100 * s.blocks / total:.0f}% of chain blocks)" if total else ""
+        lines = [f"mode={self.cfg.mode} blocks={s.blocks}{seen} routes={len(self.routes)} "
                  f"candidates={s.candidates} slowest_block_eval={s.eval_ms_max:.0f}ms"]
         if s.best_edge_pct is not None:
             lines.append(f"  closest this period: best edge after pool fees {s.best_edge_pct:+.4f}% "

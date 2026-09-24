@@ -8,7 +8,9 @@ Addresses are kept lowercase internally and checksummed only for web3.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Sequence, Tuple
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .amm import Pool
 from .config import Config
@@ -27,7 +29,9 @@ MULTICALL3_ABI = [{
         {"name": "success", "type": "bool"},
         {"name": "returnData", "type": "bytes"}]}],
 }]
-_CHUNK = 250
+_CHUNK = 500
+_PARALLEL_REQUESTS = 4
+_GAS_PRICE_TTL_S = 15.0
 
 
 class Chain:
@@ -48,7 +52,12 @@ class Chain:
         self.decimals: Dict[str, int] = {}
         self.vault_balances: Dict[str, int] = {}
         self.last_gas_price_wei = 0
+        self._gas_price_at = float("-inf")
         self._last_block: Optional[int] = None
+        # Pools the bot's routes use. Only these are re-read every block; the
+        # rest are refreshed when routes are rebuilt (see refresh_all).
+        self.tracked: Optional[Set[str]] = None
+        self._pool_executor = ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS)
 
     # ----- helpers ----------------------------------------------------------
 
@@ -66,12 +75,16 @@ class Chain:
 
     def call_many(self, calls: Sequence[Tuple[str, bytes]], block="latest") -> List[Optional[bytes]]:
         """Batch eth_calls through Multicall3. Failed or empty results come back as None."""
-        results: List[Optional[bytes]] = []
-        for i in range(0, len(calls), _CHUNK):
-            chunk = [(self.cs(target), True, data) for target, data in calls[i:i + _CHUNK]]
-            for success, data in self._mc.functions.aggregate3(chunk).call(block_identifier=block):
-                results.append(bytes(data) if success and len(data) > 0 else None)
-        return results
+        chunks = [[(self.cs(target), True, data) for target, data in calls[i:i + _CHUNK]]
+                  for i in range(0, len(calls), _CHUNK)]
+
+        def run(chunk):
+            return self._mc.functions.aggregate3(chunk).call(block_identifier=block)
+
+        # Chunks are independent and pinned to the same block, so send them in parallel.
+        batches = self._pool_executor.map(run, chunks) if len(chunks) > 1 else map(run, chunks)
+        return [bytes(data) if success and len(data) > 0 else None
+                for batch in batches for success, data in batch]
 
     # ----- setup ------------------------------------------------------------
 
@@ -228,11 +241,18 @@ class Chain:
 
     # ----- per block --------------------------------------------------------
 
-    def refresh(self) -> int:
-        """Re-read every pool and the vault's balances if a new block exists."""
+    def refresh_all(self) -> int:
+        """Re-read every discovered pool, not just the tracked ones."""
+        return self.refresh(full=True)
+
+    def refresh(self, full: bool = False) -> int:
+        """Re-read the tracked pools (or all, if full) and the vault's balances
+        if a new block exists."""
         block = self.w3.eth.block_number
-        if block == self._last_block:
+        if block == self._last_block and not full:
             return block
+        pools = self.pools if full or self.tracked is None else \
+            [p for p in self.pools if p.address in self.tracked]
         get_reserves = self.selector("getReserves()")
         slot0 = self.selector("slot0()")
         global_state = self.selector("globalState()")
@@ -240,7 +260,7 @@ class Chain:
         balance_of = self.selector("balanceOf(address)") + self.encode(["address"], [self.cs(self.cfg.balancer_vault)])
 
         calls = []
-        for pool in self.pools:
+        for pool in pools:
             if pool.kind in ("v2", "camelot_v2"):
                 calls.append((pool.address, get_reserves))
             else:
@@ -250,7 +270,7 @@ class Chain:
         calls += [(t, balance_of) for t in flash_tokens]
 
         results = iter(self.call_many(calls, block))
-        for pool in self.pools:
+        for pool in pools:
             if pool.kind in ("v2", "camelot_v2"):
                 data = next(results)
                 if data is None:
@@ -286,5 +306,8 @@ class Chain:
         return block
 
     def gas_price_wei(self) -> int:
-        self.last_gas_price_wei = int(self.w3.eth.gas_price)
+        # Arbitrum's gas price barely moves; don't spend a request on it every block.
+        if time.monotonic() - self._gas_price_at >= _GAS_PRICE_TTL_S:
+            self.last_gas_price_wei = int(self.w3.eth.gas_price)
+            self._gas_price_at = time.monotonic()
         return self.last_gas_price_wei
