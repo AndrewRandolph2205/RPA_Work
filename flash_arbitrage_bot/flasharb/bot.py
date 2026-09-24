@@ -52,6 +52,7 @@ class Stats:
     best_edge_route: str = ""
     best_net_usd: Optional[float] = None
     best_net_route: str = ""
+    best_net_detail: str = ""
     eval_ms_max: float = 0.0
     best_verified_usd: Optional[float] = None
     best_verified_route: str = ""
@@ -60,7 +61,7 @@ class Stats:
         self.eval_ms_max = 0.0
         self.best_verified_usd, self.best_verified_route = None, ""
         self.best_edge_pct, self.best_edge_route = None, ""
-        self.best_net_usd, self.best_net_route = None, ""
+        self.best_net_usd, self.best_net_route, self.best_net_detail = None, "", ""
 
 
 class FlashBot:
@@ -116,6 +117,11 @@ class FlashBot:
         self.routes = find_cycles(pools, self.flash_tokens, self.cfg.max_hops)
         # (pool address, token in) per hop, precomputed for the fast pre-filter.
         self._route_keys = [tuple((p.address, t_in) for p, t_in, _ in r.hops()) for r in self.routes]
+        if not self.routes or self._routes_built_at == float("-inf"):
+            capacity = ", ".join(
+                f"{self.symbols.get(t, t)} ${to_usd(self.chain.vault_balances.get(t, 0), t, prices, self.chain.decimals):,.0f}"
+                for t in self.flash_tokens if t in self.chain.decimals)
+            log.info("flash loan capacity (Balancer vault): %s", capacity or "unknown")
         if hasattr(self.chain, "tracked"):
             # From now on only pools on some route are re-read every block.
             self.chain.tracked = {p.address for r in self.routes for p in r.pools}
@@ -149,7 +155,7 @@ class FlashBot:
         stats = self.stats
         found = []
         best_log, best_route = None, None
-        best_net, best_net_route = None, None
+        best_net, best_net_route, best_detail = None, None, ""
         for route, keys in zip(self.routes, self._route_keys):
             try:
                 edge_log = sum(rates[k] for k in keys)
@@ -160,16 +166,23 @@ class FlashBot:
             if edge_log <= 0:
                 continue
             start = route.start
-            max_in = min(self.chain.vault_balances.get(start, 0),
-                         from_usd(self.cfg.risk.max_loan_usd, start, prices, dec))
-            amount_in = optimal_input_from(route.mobius(), max_in)
+            vault_cap = self.chain.vault_balances.get(start, 0)
+            config_cap = from_usd(self.cfg.risk.max_loan_usd, start, prices, dec)
+            coeffs = route.mobius()
+            amount_in = optimal_input_from(coeffs, min(vault_cap, config_cap))
             if not amount_in:
                 continue
             amount_out = route.amount_out(amount_in)
             profit_usd = to_usd(amount_out - amount_in, start, prices, dec)
             net = profit_usd - gas_usd
             if best_net is None or net > best_net:
+                ideal = optimal_input_from(coeffs, 10 ** 40) or 0
+                limit = ("" if ideal <= min(vault_cap, config_cap) else
+                         "capped by Balancer's balance" if vault_cap < config_cap else "capped by max_loan_usd")
                 best_net, best_net_route = net, route
+                best_detail = (f"size ${to_usd(amount_in, start, prices, dec):,.0f}"
+                               f"{' (' + limit + ')' if limit else ''}, "
+                               f"profit ${profit_usd:.3f} - gas ${gas_usd:.3f}")
             if net >= self.cfg.risk.min_profit_usd:
                 found.append(Opportunity(route, amount_in, amount_out, profit_usd, gas_usd))
 
@@ -180,6 +193,7 @@ class FlashBot:
                 stats.best_edge_pct, stats.best_edge_route = edge, best_route.describe(self.symbols)
         if best_net is not None and (stats.best_net_usd is None or best_net > stats.best_net_usd):
             stats.best_net_usd, stats.best_net_route = best_net, best_net_route.describe(self.symbols)
+            stats.best_net_detail = best_detail
         stats.eval_ms_max = max(stats.eval_ms_max, (time.perf_counter() - started) * 1000)
 
         found.sort(key=lambda o: o.net_usd, reverse=True)
@@ -350,6 +364,7 @@ class FlashBot:
         if s.best_net_usd is not None:
             lines.append(f"  best trade after gas (estimate) ${s.best_net_usd:+.2f} ({s.best_net_route}); "
                          f"needs >= ${self.cfg.risk.min_profit_usd:.2f}")
+            lines.append(f"    {s.best_net_detail}")
         else:
             lines.append("  no route had a positive edge after pool fees this period")
         if self.cfg.mode == "scan" and s.quoter_verified + s.quoter_rejected:

@@ -270,6 +270,15 @@ class BotTests(unittest.TestCase):
         self.assertEqual(bot.stats.candidates, 0)
         self.assertGreater(bot.stats.best_net_usd, 0)
         self.assertIn("needs >= $10000.00", bot.summary())
+        self.assertIn("profit $", bot.summary())
+        self.assertNotIn("capped", bot.summary())
+
+    def test_summary_says_when_trade_size_is_capped_by_vault(self):
+        dear = pool("dear", WETH, USDC, 1000 * E18, 2_050_000 * E6)
+        chain = FakeChain([self.cheap, dear], vault={WETH: E18 // 10, USDC: 100 * E6})
+        bot = self.bot("scan", chain=chain)
+        bot.step()
+        self.assertIn("capped by Balancer's balance", bot.summary())
         bot.stats.reset_window()
         self.assertIsNone(bot.stats.best_edge_pct)
 
