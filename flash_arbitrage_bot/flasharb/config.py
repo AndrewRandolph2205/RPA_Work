@@ -37,6 +37,16 @@ class DexConfig:
 
 
 @dataclass
+class DiscoveryConfig:
+    enabled: bool = False
+    min_liquidity_usd: float = 20_000.0   # real WETH/stable value paired against the token
+    max_tokens: int = 150
+    max_pairs_per_factory: int = 30_000   # newest pairs first
+    cache_hours: float = 24.0
+    cache_file: str = "logs/discovered_tokens.json"
+
+
+@dataclass
 class Config:
     mode: str
     chain_name: str
@@ -59,6 +69,7 @@ class Config:
     summary_interval_s: float = 60.0
     log_dir: str = "logs"
     risk: RiskLimits = field(default_factory=RiskLimits)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
 
     def token(self, symbol: str) -> str:
         return self.tokens[symbol]
@@ -73,6 +84,10 @@ def load_config(path: str | Path) -> Config:
     with open(path, "rb") as fh:
         raw = tomllib.load(fh)
 
+    discovery_raw = raw.pop("discovery", {})
+    unknown = set(discovery_raw) - {f.name for f in fields(DiscoveryConfig)}
+    if unknown:
+        raise ValueError(f"unknown [discovery] keys: {sorted(unknown)}")
     risk_raw = raw.pop("risk", {})
     unknown = set(risk_raw) - {f.name for f in fields(RiskLimits)}
     if unknown:
@@ -88,7 +103,8 @@ def load_config(path: str | Path) -> Config:
     unknown = set(raw) - {f.name for f in fields(Config)}
     if unknown:
         raise ValueError(f"unknown settings: {sorted(unknown)}")
-    cfg = Config(risk=RiskLimits(**risk_raw), dexes=dexes, **raw)
+    cfg = Config(risk=RiskLimits(**risk_raw), discovery=DiscoveryConfig(**discovery_raw),
+                 dexes=dexes, **raw)
     validate(cfg)
     # Lowercase every address so lookups never depend on checksum casing.
     cfg.tokens = {sym: addr.lower() for sym, addr in cfg.tokens.items()}

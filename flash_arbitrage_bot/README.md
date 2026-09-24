@@ -157,6 +157,13 @@ reverts means others are faster; the bot halts itself after
   tokens are skipped with a warning, and a symbol that doesn't match its name
   is flagged. The summary's `slowest_block_eval` shows how long each block's
   analysis takes; keep it well under 250ms (about 40,000 routes take ~25ms).
+- **Long-tail discovery** (`[discovery]`, on by default): the bot reads every
+  pair listed by the V2-style factories (Sushi, Uniswap V2, Camelot V2), keeps
+  up to `max_tokens` tokens with at least `min_liquidity_usd` of real WETH or
+  stablecoin paired against them, and compares them across all DEXes. Fewer
+  bots watch these tokens, but some charge a hidden transfer tax that makes
+  fake gaps: scan mode flags gaps involving them, and only simulate mode can
+  confirm one. The first run takes a few minutes and is cached for a day.
 - **More DEXes:** any Uniswap V2 fork (factory + router), Uniswap V3 fork whose
   router takes `exactInputSingle`, Camelot-style V2 pairs, or Algebra-based V3
   pools. Set `type` and `router_kind` to match. `selftest` runs a round trip

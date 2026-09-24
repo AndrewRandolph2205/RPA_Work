@@ -134,3 +134,17 @@ min_pool_liquidity_usd = 25000.0  # ignore thin pools (they produce fake "opport
 max_gas_price_gwei = 1.0        # skip blocks when gas spikes
 max_daily_gas_usd = 5.0         # stop sending after burning this much gas on reverts in a day
 max_consecutive_reverts = 3     # halt the bot after this many reverts in a row
+
+# Long-tail token discovery: read every pair the V2-style factories list
+# (Sushi, Uniswap V2, Camelot V2), keep tokens with real WETH/stablecoin
+# liquidity against them, and watch those too across all dexes. Fewer bots
+# watch these, but some are scams/transfer-tax tokens: gaps involving them are
+# flagged in scan mode and only simulate mode can confirm them.
+# The first run takes a few minutes; results are cached for cache_hours.
+[discovery]
+enabled = true
+min_liquidity_usd = 20000.0
+max_tokens = 150
+max_pairs_per_factory = 30000
+cache_hours = 24
+cache_file = "logs/discovered_tokens.json"

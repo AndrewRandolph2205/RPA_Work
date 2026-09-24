@@ -47,6 +47,7 @@ class Stats:
     simulated_net_usd: float = 0.0
     quoter_verified: int = 0
     quoter_verified_net_usd: float = 0.0  # scan mode: sum of verified gaps, each counted once
+    verified_long_tail: int = 0  # of those, how many touch a discovered (long-tail) token
     quoter_rejected: int = 0
     # "Closest miss" diagnostics, reset after every summary.
     best_edge_pct: Optional[float] = None
@@ -304,6 +305,11 @@ class FlashBot:
                 s.best_verified_usd = best_net
                 s.best_verified_route = opp.route.describe(self.symbols)
             tag = "quoter-verified" if verified else "partly verified (dex without quoter)"
+            if set(opp.route.path) & getattr(self.chain, "discovered", set()):
+                # Tokens with a transfer tax look profitable to any price quote; only
+                # simulating the real transaction (simulate mode) reveals them.
+                s.verified_long_tail += 1
+                tag += ", long-tail token: confirm in simulate mode"
             return f"{tag}: net ${best_net:.2f} at {self._fmt_amount(opp, best_amount)}"
         s.quoter_rejected += 1
         return f"rejected by quoter: real net ${best_net:.2f} (estimate was ${opp.net_usd:.2f})"
@@ -374,6 +380,9 @@ class FlashBot:
                     if s.best_verified_usd is not None else "none real this period")
             lines.append(f"  exact quotes: verified={s.quoter_verified} "
                          f"rejected={s.quoter_rejected}; {best}")
+            if s.verified_long_tail:
+                lines.append(f"    {s.verified_long_tail} of the verified gaps involve long-tail tokens; "
+                             f"some may be transfer-tax tokens that only simulate mode can rule out")
             lines.append(f"  verified total since start ${s.quoter_verified_net_usd:.2f} "
                          f"(${s.quoter_verified_net_usd / hours:.2f}/hr if the bot had won every one; "
                          f"it wouldn't)")

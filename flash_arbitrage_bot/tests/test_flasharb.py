@@ -414,6 +414,60 @@ class TrackingTests(unittest.TestCase):
         self.assertIn("saw 33% of chain blocks", bot.summary())
 
 
+class DiscoveryTests(unittest.TestCase):
+    NEW, TINY, SCAM = "0x" + "a" * 40, "0x" + "b" * 40, "0x" + "c" * 40
+
+    def test_selects_liquid_tokens_by_priced_side_only(self):
+        from flasharb.discovery import select_tokens
+        prices = {USDC: 1.0, WETH: 2000.0}
+        records = [
+            (self.NEW, USDC, 10 ** 24, 50_000 * E6),       # $100k liquidity: kept
+            (WETH, self.TINY, 2 * E18, 10 ** 24),          # $8k: below threshold
+            (self.SCAM, ARB, 10 ** 40, 10 ** 30),          # ARB unpriced: can't value, skipped
+        ]
+        chosen = select_tokens(records, prices, DEC, 20_000, 10, exclude={WETH, USDC})
+        self.assertEqual(chosen, [(self.NEW, 100_000.0)])
+
+    def test_max_tokens_keeps_deepest(self):
+        from flasharb.discovery import select_tokens
+        records = [(self.NEW, USDC, 1, 30_000 * E6), (self.TINY, USDC, 1, 90_000 * E6)]
+        chosen = select_tokens(records, {USDC: 1.0}, DEC, 20_000, 1, exclude=set())
+        self.assertEqual([t for t, _ in chosen], [self.TINY])
+
+    def test_unique_names(self):
+        from flasharb.discovery import unique_name
+        taken = {"USDC", "PEPE"}
+        self.assertEqual(unique_name("PEPE", "0xabcd1234" + "0" * 32, taken), "PEPE_abcd")
+        self.assertEqual(unique_name("NEW", "0x" + "1" * 40, taken), "NEW")
+        self.assertEqual(unique_name("bad name\n", "0x" + "1" * 40, taken), "badname")
+
+    def test_cache_round_trip_and_expiry(self):
+        from pathlib import Path
+        from flasharb.discovery import load_cache, save_cache
+        path = Path(tempfile.mkdtemp()) / "tokens.json"
+        tokens = [{"address": self.NEW, "symbol": "NEW", "decimals": 18, "liquidity_usd": 1}]
+        save_cache(path, 42161, 20_000, tokens)
+        self.assertEqual(load_cache(path, 42161, 24, 20_000), tokens)
+        self.assertIsNone(load_cache(path, 1, 24, 20_000))          # other chain
+        self.assertIsNone(load_cache(path, 42161, 24, 50_000))      # threshold changed
+        self.assertIsNone(load_cache(path, 42161, 0, 20_000))       # expired
+
+    def test_long_tail_gaps_are_flagged_in_scan_mode(self):
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        a = pool("a", ARB, USDC, 1_000_000 * E18, 1_000_000 * E6, fee=500)
+        b = pool("b", ARB, USDC, 1_000_000 * E18, 1_030_000 * E6, fee=500)
+        cfg.flash_tokens = ["USDC"]
+        chain = FakeChain([a, b])
+        chain.quote_route = lambda route, amount: (route.amount_out(amount), True)
+        chain.discovered = {ARB}
+        bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
+        bot.step()
+        with open(f"{tmp}/opportunities.csv") as fh:
+            self.assertIn("long-tail token: confirm in simulate mode", fh.read())
+        self.assertIn("involve long-tail tokens", bot.summary())
+
+
 class ConfigTests(unittest.TestCase):
     def test_rejects_bad_address_and_unknown_symbol(self):
         cfg = make_config("scan", tempfile.mkdtemp())

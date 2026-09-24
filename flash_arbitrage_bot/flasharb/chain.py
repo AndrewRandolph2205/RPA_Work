@@ -12,8 +12,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from pathlib import Path
+
+from . import discovery
 from .amm import Pool
 from .config import Config
+from .routes import usd_prices
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +61,7 @@ class Chain:
         # Pools the bot's routes use. Only these are re-read every block; the
         # rest are refreshed when routes are rebuilt (see refresh_all).
         self.tracked: Optional[Set[str]] = None
+        self.discovered: Set[str] = set()  # long-tail tokens added by discovery
         self._pool_executor = ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS)
 
     # ----- helpers ----------------------------------------------------------
@@ -106,11 +111,100 @@ class Chain:
                                "the bot can't value gas without it")
         if not any(self.cfg.token(s) in self.decimals for s in self.cfg.stable_tokens):
             raise RuntimeError("no stable token passed verification; profits can't be valued in USD")
-        tokens = list(self.decimals)
-        self.pools = self._discover_pools(tokens)
+        core = list(self.decimals)
+        pairs = [(a, b) for i, a in enumerate(core) for b in core[i + 1:]]
+        self.discovered: Set[str] = set()
+        if self.cfg.discovery.enabled:
+            extra = self._discover_tokens(core, pairs)
+            self.discovered = set(extra)
+            # Long-tail tokens are paired with the core tokens only: pools between
+            # two long-tail tokens are rare and would multiply the lookups.
+            pairs += [(c, e) for e in extra for c in core]
+        self.pools = self._discover_pools(pairs)
         self.refresh_pool_balances()
-        log.info("found %d pools across %d dexes for %d tokens",
-                 len(self.pools), len(self.cfg.dexes), len(tokens))
+        self._last_block = None  # pool list changed: next refresh must read everything
+        log.info("found %d pools across %d dexes for %d tokens (%d discovered)",
+                 len(self.pools), len(self.cfg.dexes), len(self.decimals), len(self.discovered))
+
+    # ----- long-tail token discovery ------------------------------------------
+
+    def _discover_tokens(self, core: List[str], core_pairs) -> List[str]:
+        """Add liquid tokens found in the V2-style factories' pair lists (cached)."""
+        disc = self.cfg.discovery
+        cache = Path(disc.cache_file)
+        tokens = discovery.load_cache(cache, self.cfg.chain_id, disc.cache_hours, disc.min_liquidity_usd)
+        if tokens is None:
+            log.info("discovering tokens (one-off, cached for %.0fh; can take a few minutes)...",
+                     disc.cache_hours)
+            # Price the core tokens first; new tokens are valued against them.
+            self.pools = self._discover_pools(core_pairs)
+            self.refresh(full=True)
+            self.refresh_pool_balances()
+            stables = {self.cfg.token(s) for s in self.cfg.stable_tokens if self.cfg.token(s) in self.decimals}
+            prices = usd_prices(self.pools, self.decimals, stables)
+            records = self._enumerate_v2_pairs()
+            chosen = discovery.select_tokens(records, prices, self.decimals, disc.min_liquidity_usd,
+                                             disc.max_tokens, exclude=set(core))
+            meta = self._token_meta([t for t, _ in chosen])
+            tokens = [{"address": t, "symbol": meta[t][1], "decimals": meta[t][0],
+                       "liquidity_usd": round(liq)} for t, liq in chosen if t in meta]
+            discovery.save_cache(cache, self.cfg.chain_id, disc.min_liquidity_usd, tokens)
+            log.info("kept %d tokens with >= $%s liquidity against priced tokens",
+                     len(tokens), f"{disc.min_liquidity_usd:,.0f}")
+        taken = set(self.cfg.tokens)
+        added = []
+        for entry in tokens:
+            name = discovery.unique_name(entry["symbol"], entry["address"], taken)
+            taken.add(name)
+            self.cfg.tokens[name] = entry["address"]
+            self.decimals[entry["address"]] = int(entry["decimals"])
+            added.append(entry["address"])
+        return added
+
+    def _enumerate_v2_pairs(self) -> List[discovery.PairRecord]:
+        """(token0, token1, reserve0, reserve1) for the newest pairs of every V2-style factory."""
+        records: List[discovery.PairRecord] = []
+        for dex in self.cfg.dexes.values():
+            if dex.type not in ("v2", "camelot_v2"):
+                continue
+            data = self.call_many([(dex.factory, self.selector("allPairsLength()"))])[0]
+            total = self.decode(["uint256"], data)[0] if data else 0
+            first = max(0, total - self.cfg.discovery.max_pairs_per_factory)
+            all_pairs = self.selector("allPairs(uint256)")
+            results = self.call_many([(dex.factory, all_pairs + self.encode(["uint256"], [i]))
+                                      for i in range(first, total)])
+            pairs = [self.decode(["address"], r)[0].lower() for r in results if r]
+            calls = []
+            for pair in pairs:
+                calls += [(pair, self.selector("token0()")), (pair, self.selector("token1()")),
+                          (pair, self.selector("getReserves()"))]
+            info = self.call_many(calls)
+            for i in range(len(pairs)):
+                t0, t1, res = info[3 * i], info[3 * i + 1], info[3 * i + 2]
+                if not (t0 and t1 and res and len(res) >= 64):
+                    continue
+                r0, r1 = self.decode(["uint112", "uint112"], res[:64])
+                records.append((self.decode(["address"], t0)[0].lower(),
+                                self.decode(["address"], t1)[0].lower(), r0, r1))
+            log.info("  %s: scanned %d of %d pairs", dex.name, len(pairs), total)
+        return records
+
+    def _token_meta(self, tokens: List[str]) -> Dict[str, Tuple[int, str]]:
+        """{token: (decimals, symbol)} for tokens that answer like normal ERC-20s."""
+        calls = []
+        for token in tokens:
+            calls += [(token, self.selector("decimals()")), (token, self.selector("symbol()"))]
+        results = self.call_many(calls)
+        meta = {}
+        for i, token in enumerate(tokens):
+            dec_data, sym_data = results[2 * i], results[2 * i + 1]
+            if not dec_data:
+                continue
+            dec = self.decode(["uint8"], dec_data[:32])[0] if len(dec_data) >= 32 else None
+            if dec is None or dec > 36:
+                continue
+            meta[token] = (dec, self._decode_symbol(sym_data) or token[:8])
+        return meta
 
     def _verify_tokens(self) -> Dict[str, int]:
         """Ask every configured token for decimals() and symbol().
@@ -145,27 +239,26 @@ class Chain:
         except Exception:  # a few old tokens return bytes32 instead of string
             return data[:32].rstrip(b"\0").decode("utf-8", "replace") or None
 
-    def _discover_pools(self, tokens: List[str]) -> List[Pool]:
+    def _discover_pools(self, token_pairs: Sequence[Tuple[str, str]]) -> List[Pool]:
         get_pair = self.selector("getPair(address,address)")
         get_pool = self.selector("getPool(address,address,uint24)")
         pool_by_pair = self.selector("poolByPair(address,address)")
         calls, meta = [], []
         for dex in self.cfg.dexes.values():
-            for i, a in enumerate(tokens):
-                for b in tokens[i + 1:]:
-                    t0, t1 = sorted((a, b), key=lambda x: int(x, 16))
-                    pair = self.encode(["address", "address"], [self.cs(t0), self.cs(t1)])
-                    if dex.type in ("v2", "camelot_v2"):
-                        calls.append((dex.factory, get_pair + pair))
-                        meta.append((dex, t0, t1, dex.fee))
-                    elif dex.type == "algebra":  # one pool per pair, fee read each block
-                        calls.append((dex.factory, pool_by_pair + pair))
-                        meta.append((dex, t0, t1, 0))
-                    else:
-                        for fee in dex.fee_tiers:
-                            calls.append((dex.factory, get_pool + self.encode(
-                                ["address", "address", "uint24"], [self.cs(t0), self.cs(t1), fee])))
-                            meta.append((dex, t0, t1, fee))
+            for a, b in token_pairs:
+                t0, t1 = sorted((a, b), key=lambda x: int(x, 16))
+                pair = self.encode(["address", "address"], [self.cs(t0), self.cs(t1)])
+                if dex.type in ("v2", "camelot_v2"):
+                    calls.append((dex.factory, get_pair + pair))
+                    meta.append((dex, t0, t1, dex.fee))
+                elif dex.type == "algebra":  # one pool per pair, fee read each block
+                    calls.append((dex.factory, pool_by_pair + pair))
+                    meta.append((dex, t0, t1, 0))
+                else:
+                    for fee in dex.fee_tiers:
+                        calls.append((dex.factory, get_pool + self.encode(
+                            ["address", "address", "uint24"], [self.cs(t0), self.cs(t1), fee])))
+                        meta.append((dex, t0, t1, fee))
         pools = []
         for (dex, t0, t1, fee), data in zip(meta, self.call_many(calls)):
             if data is None:
