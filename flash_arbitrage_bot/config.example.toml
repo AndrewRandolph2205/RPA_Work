@@ -1,0 +1,160 @@
+# Copy to config.toml (git-ignored) and edit.
+#
+# mode:
+#   "scan"     - read pools every block and log opportunities the math finds.
+#                Needs only RPC_URL. No contract, no wallet, no cost.
+#   "simulate" - also run each opportunity through the deployed contract with
+#                eth_call (a free, exact dry run). Never sends anything.
+#   "live"     - send real transactions. Also requires the --live flag.
+mode = "scan"
+
+# ---- Network: Arbitrum One ------------------------------------------------
+# Arbitrum: cheap gas, and its sequencer has no public mempool, so other bots
+# can't front-run or sandwich your transactions.
+# Verify every address below on https://arbiscan.io before going live;
+# `python run_flash.py selftest` checks they all hold contracts.
+chain_name = "arbitrum"
+chain_id = 42161
+rpc_url_env = "RPC_URL"
+
+# Balancer V2 vault: flash loans with no fee (same address on every chain).
+balancer_vault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+
+# Filled in after `python run_flash.py deploy`.
+contract_address = ""
+# For simulate mode without a PRIVATE_KEY: the wallet that deployed the contract.
+owner_address = ""
+
+# ---- Bot behaviour ----------------------------------------------------------
+max_hops = 3                    # 2 = A->B->A, 3 adds triangles A->B->C->A
+poll_interval_s = 0.25          # Arbitrum makes a block roughly every 0.25s
+max_candidates_per_block = 3    # how many top opportunities to simulate per block
+sim_cooldown_blocks = 20        # after a failed simulation, skip that route this many blocks
+gas_units_estimate = 450000     # for pre-screening; real gas comes from simulation
+route_rebuild_s = 3600          # re-check which pools are liquid enough, hourly
+summary_interval_s = 60
+log_dir = "logs"
+
+# ---- Tokens -----------------------------------------------------------------
+native_wrapped = "WETH"                              # gas token, for gas-cost math
+stable_tokens = ["USDC", "USDC.e", "USDT", "DAI"]    # treated as $1 for valuation
+flash_tokens = ["WETH", "USDC", "USDT"]              # tokens the bot may borrow
+
+# At startup the bot asks each token for its decimals and symbol: addresses that
+# aren't tokens are skipped with a warning, and a symbol that doesn't match the
+# name here is flagged so you can double-check it on arbiscan.io.
+# Remove any line to drop that token; add your own the same way.
+[tokens]
+# Core: gas token and stablecoins
+WETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+"USDC.e" = "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"
+USDT = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
+DAI = "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"
+FRAX = "0x17FC002b466eEc40DaE837Fc4bE5c67993ddBd6F"
+LUSD = "0x93b346b6BC2548dA6A1E7d98E9a421B42541425b"
+USDe = "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34"
+# More "should be worth the same" tokens. Pairs like these (e.g. tBTC/WBTC)
+# briefly drift apart after big trades and produced the best real gap in
+# testing. Added from memory: the startup check skips any address that isn't
+# a token and flags any whose symbol doesn't match.
+sUSDe = "0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2"
+GHO = "0x7dfF72693f6A4149b17e7C6314655f6A9F7c8B33"
+crvUSD = "0x498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5"
+# Bitcoin
+WBTC = "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"
+tBTC = "0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40"
+cbBTC = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+# Liquid-staked ETH (priced close to WETH: small gaps between them are common)
+wstETH = "0x5979D7b546E38E414F7E9822514be443A4800529"
+rETH = "0xEC70Dcb4A1EFa46b8F2D97C310C9c4790ba5ffA8"
+weETH = "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe"
+ezETH = "0x2416092f143378750bb29b79eD961ab195CcEea5"
+rsETH = "0x4186BFC76E2E237523CBC30FD220FE055156b41F"
+# Arbitrum ecosystem
+ARB = "0x912CE59144191C1204E64559FE8253a0e49E6548"
+GMX = "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a"
+MAGIC = "0x539bdE0d7Dbd336b79148AA742883198BBF60342"
+RDNT = "0x3082CC23568eA640225c2467653dB90e9250AaA0"
+GNS = "0x18c11FD286C5EC11c3b683Caa813B77f5163A122"
+JOE = "0x371c7ec6D8039ff7933a2AA28EB827Ffe1F52f07"
+PENDLE = "0x0c880f6761F1af8d9Aa9C466984b80DAb9a8c9e8"
+# DeFi blue chips (bridged)
+LINK = "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4"
+UNI = "0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0"
+AAVE = "0xba5DdD1f9d7F570dc94a51479a000E3BCE967196"
+CRV = "0x11cDb42B0EB46D95f990BeDD4695A6e3fA034978"
+LDO = "0x13Ad51ed4F1B7e9Dc168d8a00cB3f4dDD85EfA60"
+GRT = "0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
+COMP = "0x354A6dA3fcde098F8389cad84b0182725c6C91dE"
+SUSHI = "0xd4d42F0b6DEF4CE0383636770eF773390d85c61A"
+STG = "0x6694340fc020c5E6B96567843da2df01b2CE1eb6"
+
+# ---- DEXes ------------------------------------------------------------------
+# type:        "v2"         Uniswap V2 style pairs (fixed fee)
+#              "v3"         Uniswap V3 style pools (one pool per fee tier)
+#              "camelot_v2" Camelot V2 pairs (fee per direction, read every block;
+#                           "stable" pairs are skipped automatically)
+#              "algebra"    Camelot V3 / Algebra pools (one per pair, dynamic fees)
+# router_kind: "v2", "v3_router02" (Uniswap SwapRouter02, no deadline field),
+#              "v3_router" (original Uniswap V3 SwapRouter, with deadline),
+#              "camelot_v2" or "algebra"
+# quoter:      concentrated-liquidity dexes only; used to price candidates exactly
+[dexes.uniswap_v3]
+type = "v3"
+factory = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+router = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+router_kind = "v3_router02"
+fee_tiers = [100, 500, 3000, 10000]
+quoter = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"   # QuoterV2: exact prices for scan mode
+
+[dexes.sushiswap]
+type = "v2"
+factory = "0xc35DADB65012eC5796536bD9864eD8773aBc74C4"
+router = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
+router_kind = "v2"
+fee = 3000
+
+[dexes.uniswap_v2]
+type = "v2"
+factory = "0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9"
+router = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
+router_kind = "v2"
+fee = 3000
+
+# Camelot: Arbitrum's largest home-grown DEX, so its prices are compared
+# against Uniswap/Sushi by fewer bots.
+[dexes.camelot_v2]
+type = "camelot_v2"
+factory = "0x6EcCab422D763aC031210895C81787E87B43A652"
+router = "0xc873fEcbd354f5A56E00E710B90EF4201db2448d"
+router_kind = "camelot_v2"
+
+[dexes.camelot_v3]
+type = "algebra"
+factory = "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B"
+router = "0x1F721E2E82F6676FCE4eA07A5958cF098D339e18"
+router_kind = "algebra"
+quoter = "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E"
+
+[risk]
+min_profit_usd = 0.50           # after gas; also enforced on-chain by the contract
+max_loan_usd = 25000.0          # largest flash loan per trade
+min_pool_liquidity_usd = 10000.0  # thinner pools = fewer competing bots, more fakes (the quote check filters them)
+max_gas_price_gwei = 1.0        # skip blocks when gas spikes
+max_daily_gas_usd = 5.0         # stop sending after burning this much gas on reverts in a day
+max_consecutive_reverts = 3     # halt the bot after this many reverts in a row
+
+# Long-tail token discovery: read every pair the V2-style factories list
+# (Sushi, Uniswap V2, Camelot V2), keep tokens with real WETH/stablecoin
+# liquidity against them, and watch those too across all dexes. Fewer bots
+# watch these, but some are scams/transfer-tax tokens: gaps involving them are
+# flagged in scan mode and only simulate mode can confirm them.
+# The first run takes a few minutes; results are cached for cache_hours.
+[discovery]
+enabled = true
+min_liquidity_usd = 10000.0
+max_tokens = 250
+max_pairs_per_factory = 30000
+cache_hours = 24
+cache_file = "logs/discovered_tokens.json"
