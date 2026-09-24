@@ -50,8 +50,35 @@ def connect(cfg):
     except ModuleNotFoundError:
         sys.exit("web3 isn't installed for this Python. Install it with:\n"
                  f"  {sys.executable} -m pip install -r requirements.txt")
-    chain.check_network()
+    try:
+        chain.check_network()
+    except RuntimeError as exc:  # wrong chain
+        sys.exit(str(exc))
+    except Exception as exc:
+        sys.exit(explain_rpc_error(exc, cfg))
     return chain
+
+
+def mask_url(url: str) -> str:
+    """Hide the API key (usually the last path segment) when printing an RPC URL."""
+    head, _, tail = url.rstrip("/").rpartition("/")
+    return f"{head}/{tail[:4]}..." if head and len(tail) > 8 else url
+
+
+def explain_rpc_error(exc: Exception, cfg) -> str:
+    url = os.environ.get(cfg.rpc_url_env, "")
+    text = str(exc).replace(url, mask_url(url))
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    hints = {
+        401: "The RPC rejected the API key. Check it was copied completely.",
+        403: (f"The RPC refused access. With Alchemy this usually means {cfg.chain_name} isn't "
+              "enabled for your app: open the app in the Alchemy dashboard, turn on "
+              f"'{cfg.chain_name.title()} Mainnet' under Networks, and remove any IP/domain "
+              "allowlist restrictions."),
+        429: "The RPC is rate-limiting you. Use a paid plan or a less busy endpoint.",
+    }
+    hint = hints.get(status, "Check that RPC_URL in .env is correct and your internet works.")
+    return f"Could not connect to the RPC ({mask_url(url)}).\n{hint}\n\nDetails: {text[:300]}"
 
 
 def cmd_deploy(cfg, args) -> int:
