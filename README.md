@@ -77,6 +77,15 @@ Healthcare automation sits at the intersection of everything I've built my caree
 
 ---
 
+## Projects
+
+| Project | Summary |
+|---|---|
+| [`flash_arbitrage_bot/`](flash_arbitrage_bot/) | On-chain arbitrage scanner/executor for Arbitrum: prices ~1,400 pools across 5 DEXes every 0.25s block, sizes trades in closed form, verifies candidates with exact on-chain quotes, and executes via a Balancer flash-loan contract that reverts unless profitable. Includes a measured write-up of real results. |
+| [`crypto_arbitrage_bot/`](crypto_arbitrage_bot/) | Cross-exchange arbitrage bot for centralized exchanges (ccxt): streaming order books over websockets, depth-aware fill simulation, scan/paper/live modes with risk limits. |
+
+---
+
 ## Repository Notes
 
 This is a **private** repository used for personal R&D, prototyping, and reference. Code and documentation here may include sanitized samples from past engagements, learning exercises, and exploratory work. Nothing in this repository contains proprietary client data.
