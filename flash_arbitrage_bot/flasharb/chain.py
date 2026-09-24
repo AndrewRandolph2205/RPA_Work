@@ -17,7 +17,10 @@ from pathlib import Path
 from . import discovery
 from .amm import Pool
 from .config import Config
-from .routes import usd_prices
+from .routes import flash_fee, usd_prices
+from .simulator import (CALLER, SIM_ADDRESS, SIMULATE_SELECTOR, SIMULATE_TYPES, Outcome, decode_result,
+                        looks_unsupported, route_steps)
+from .simulator_code import RUNTIME_HEX
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +39,26 @@ MULTICALL3_ABI = [{
 _CHUNK = 500
 _PARALLEL_REQUESTS = 4
 _GAS_PRICE_TTL_S = 15.0
+# Errors a node gives for a block it hasn't imported yet. The sequencer feed
+# announces blocks before RPC providers have them, so these are retried briefly.
+_NOT_YET = ("header not found", "unknown block", "block not found", "not found", "out of range",
+            "future block", "unfinalized", "too high", "exceeds latest")
+
+
+class SimUnsupported(Exception):
+    """The RPC ignores or rejects eth_call state overrides."""
+
+
+def _revert_bytes(error: dict) -> Optional[bytes]:
+    data = error.get("data")
+    if isinstance(data, dict):
+        data = data.get("data") or data.get("result")
+    if isinstance(data, str) and data.startswith("0x"):
+        try:
+            return bytes.fromhex(data[2:])
+        except ValueError:
+            return None
+    return None
 
 
 class Chain:
@@ -63,6 +86,10 @@ class Chain:
         self.tracked: Optional[Set[str]] = None
         self.discovered: Set[str] = set()  # long-tail tokens added by discovery
         self._pool_executor = ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS)
+        self._verify_executor = ThreadPoolExecutor(max_workers=_PARALLEL_REQUESTS)
+        self.flash_fee_rate = 0.0       # Balancer flash-loan fee, as a fraction (read in load())
+        self.sim_supported: Optional[bool] = None  # None until the first exact check
+        self.rpc_behind_timeouts = 0    # pinned reads that gave up waiting for the RPC
 
     # ----- helpers ----------------------------------------------------------
 
@@ -77,6 +104,10 @@ class Chain:
 
     def decode(self, types: Sequence[str], data: bytes):
         return self.w3.codec.decode(list(types), data)
+
+    def _raw(self, method: str, params: list) -> dict:
+        """Plain JSON-RPC request; errors come back in the response, not raised."""
+        return self.w3.provider.make_request(method, params)
 
     def call_many(self, calls: Sequence[Tuple[str, bytes]], block="latest") -> List[Optional[bytes]]:
         """Batch eth_calls through Multicall3. Failed or empty results come back as None."""
@@ -103,8 +134,22 @@ class Chain:
         """Labels of configured addresses that have no contract deployed."""
         return [label for label, addr in addresses.items() if len(self.w3.eth.get_code(self.cs(addr))) == 0]
 
+    def read_flash_fee_rate(self) -> float:
+        """Balancer V2's flash-loan fee (ProtocolFeesCollector), as a fraction."""
+        data = self.call_many([(self.cfg.balancer_vault, self.selector("getProtocolFeesCollector()"))])[0]
+        collector = self.decode(["address"], data)[0]
+        data = self.call_many([(collector, self.selector("getFlashLoanFeePercentage()"))])[0]
+        return self.decode(["uint256"], data)[0] / 1e18
+
     def load(self) -> None:
         self.check_network()
+        try:
+            self.flash_fee_rate = self.read_flash_fee_rate()
+            log.info("Balancer flash-loan fee: %.4f%% (%.1f bps)", self.flash_fee_rate * 100,
+                     self.flash_fee_rate * 1e4)
+        except Exception as exc:
+            log.warning("couldn't read Balancer's flash-loan fee (%s); assuming 0. Estimates will be "
+                        "too high if a fee is ever switched on.", exc)
         self.decimals = self._verify_tokens()
         if self.cfg.token(self.cfg.native_wrapped) not in self.decimals:
             raise RuntimeError(f"{self.cfg.native_wrapped} failed verification; "
@@ -298,7 +343,7 @@ class Chain:
             pool.balance0 = self.decode(["uint256"], b0)[0] if b0 else 0
             pool.balance1 = self.decode(["uint256"], b1)[0] if b1 else 0
 
-    def _quote_hop(self, pool: Pool, token_in: str, token_out: str, amount: int) -> int:
+    def _quote_hop(self, pool: Pool, token_in: str, token_out: str, amount: int, block) -> int:
         """eth_call the pool's quoter. Uniswap QuoterV2 and Algebra's Quoter differ."""
         if pool.kind == "v3":
             data = self.selector("quoteExactInputSingle((address,address,uint256,uint24,uint160))") + \
@@ -308,29 +353,91 @@ class Chain:
             data = self.selector("quoteExactInputSingle(address,address,uint256,uint160)") + \
                 self.encode(["address", "address", "uint256", "uint160"],
                             [self.cs(token_in), self.cs(token_out), int(amount), 0])
-        raw = bytes(self.w3.eth.call({"to": self.cs(pool.quoter), "data": data}))
+        raw = bytes(self.w3.eth.call({"to": self.cs(pool.quoter), "data": data}, block_identifier=block))
         return self.decode(["uint256"], raw[:32])[0]
 
-    def quote_route(self, route, amount_in: int) -> Tuple[int, bool]:
-        """Exact output of a route. V2-style hops use the fresh reserves (exact);
-        concentrated-liquidity hops ask the dex's quoter via eth_call, which walks
-        the real liquidity across price bands. Returns (amount_out, fully_verified);
-        0 if a quote reverts."""
-        amount, verified = amount_in, True
-        for pool, token_in, token_out in route.hops():
-            if not pool.concentrated:
-                amount = pool.amount_out(token_in, amount)
-            elif pool.quoter:
+    # ----- exact checks ------------------------------------------------------
+
+    def verify_route(self, route, sizes: Sequence[int], block: int) -> List[Outcome]:
+        """Exact outcome of `route` at each size, all pinned to `block` (the block the
+        estimate was made on), checked in parallel.
+
+        Uses RouteSimulator (one eth_call with a state override per size: real
+        swaps, taxes and flash-loan fee included). If the RPC doesn't support
+        state overrides, falls back to the dexes' quoter contracts, which can't
+        see transfer taxes."""
+        if self.cfg.exact_sim and self.sim_supported is not False:
+            try:
+                outcomes = list(self._verify_executor.map(lambda a: self._simulate_at(route, a, block), sizes))
+                if self.sim_supported is None:
+                    self.sim_supported = True
+                    log.info("exact checks: RouteSimulator via eth_call state override")
+                return outcomes
+            except SimUnsupported as exc:
+                self.sim_supported = False
+                log.warning("this RPC doesn't support eth_call state overrides (%s); exact checks fall "
+                            "back to quoter contracts, which can't detect transfer-tax tokens", exc)
+        return list(self._verify_executor.map(lambda a: self._quote_at(route, a, block), sizes))
+
+    def _simulate_at(self, route, amount: int, block: int) -> Outcome:
+        data = SIMULATE_SELECTOR + self.encode(SIMULATE_TYPES, [
+            self.cs(self.cfg.balancer_vault), self.cs(route.start), int(amount), route_steps(route, self.cs)])
+        tx = {"from": CALLER, "to": SIM_ADDRESS, "data": "0x" + data.hex()}
+        override = {SIM_ADDRESS: {"code": "0x" + RUNTIME_HEX}}
+        response = self._raw("eth_call", [tx, hex(block), override])
+        error = response.get("error")
+        if error is None:  # a call to an address without code "succeeds": the override was ignored
+            raise SimUnsupported("state override ignored")
+        revert = _revert_bytes(error)
+        if revert is None:
+            if looks_unsupported(error):
+                raise SimUnsupported(str(error.get("message", error))[:120])
+            return Outcome(amount, block, "sim", failed_hop=-1, reason=str(error.get("message", error))[:120])
+        return decode_result(revert, self.decode, amount, block)
+
+    def _quote_at(self, route, amount: int, block: int) -> Outcome:
+        """Quoter fallback: V2-style hops use this block's reserves (exact unless the
+        token is taxed); concentrated hops ask the dex's quoter at the same block."""
+        received, x, method = [], amount, "quoter"
+        for i, (pool, token_in, token_out) in enumerate(route.hops()):
+            if pool.concentrated and pool.quoter:
                 try:
-                    amount = self._quote_hop(pool, token_in, token_out, amount)
-                except Exception:  # e.g. not enough liquidity for this size
-                    return 0, True
+                    x = self._quote_hop(pool, token_in, token_out, x, block)
+                except Exception as exc:  # e.g. not enough liquidity for this size
+                    return Outcome(amount, block, method, received, failed_hop=i, reason=str(exc)[:120])
             else:
-                amount = pool.amount_out(token_in, amount)
-                verified = False
-            if amount <= 0:
-                return 0, verified
-        return amount, verified
+                if pool.concentrated:
+                    method = "quoter (partly model)"
+                x = pool.amount_out(token_in, x)
+            received.append(x)
+        return Outcome(amount, block, method, received, [], flash_fee(amount, self.flash_fee_rate))
+
+    # ----- history lookups (closer tracing, feed checks) -----------------------
+
+    def _result(self, method: str, params: list):
+        response = self._raw(method, params)
+        if response.get("error"):
+            raise RuntimeError(f"{method}: {response['error'].get('message', response['error'])}")
+        return response.get("result")
+
+    def logs_for(self, addresses: Sequence[str], from_block: int, to_block: int) -> List[dict]:
+        return self._result("eth_getLogs", [{"fromBlock": hex(from_block), "toBlock": hex(to_block),
+                                             "address": [self.cs(a) for a in addresses]}]) or []
+
+    def receipt_raw(self, tx_hash: str) -> Optional[dict]:
+        """Receipt as the node sends it: Arbitrum adds `timeboosted` (express lane)."""
+        return self._result("eth_getTransactionReceipt", [tx_hash])
+
+    def block_hash(self, number: int) -> Optional[str]:
+        block = self._result("eth_getBlockByNumber", [hex(number), False])
+        return block.get("hash") if block else None
+
+    def block_number_by_hash(self, block_hash: str) -> Optional[int]:
+        block = self._result("eth_getBlockByHash", [block_hash, False])
+        return int(block["number"], 16) if block else None
+
+    def head(self) -> int:
+        return int(self.w3.eth.block_number)
 
     # ----- per block --------------------------------------------------------
 
@@ -338,10 +445,15 @@ class Chain:
         """Re-read every discovered pool, not just the tracked ones."""
         return self.refresh(full=True)
 
-    def refresh(self, full: bool = False) -> int:
-        """Re-read the tracked pools (or all, if full) and the vault's balances
-        if a new block exists."""
-        block = self.w3.eth.block_number
+    def refresh(self, full: bool = False, block: Optional[int] = None, wait_s: float = 0.75) -> int:
+        """Re-read the tracked pools (or all, if full) and the vault's balances if
+        a new block exists. Returns the block that was read.
+
+        With `block` (announced by the sequencer feed) the read is pinned to it,
+        retrying for up to `wait_s` while the RPC node catches up; feeds run
+        ahead of RPC providers. Without it, the RPC's latest block is read."""
+        if block is None:
+            block = self.w3.eth.block_number
         if block == self._last_block and not full:
             return block
         pools = self.pools if full or self.tracked is None else \
@@ -362,7 +474,8 @@ class Chain:
         flash_tokens = [self.cfg.token(s) for s in self.cfg.flash_tokens]
         calls += [(t, balance_of) for t in flash_tokens]
 
-        results = iter(self.call_many(calls, block))
+        data, block = self._read_at(calls, block, wait_s)
+        results = iter(data)
         for pool in pools:
             if pool.kind in ("v2", "camelot_v2"):
                 data = next(results)
@@ -397,6 +510,25 @@ class Chain:
             self.vault_balances[token] = self.decode(["uint256"], data)[0] if data else 0
         self._last_block = block
         return block
+
+    def _read_at(self, calls, block: int, wait_s: float) -> Tuple[List[Optional[bytes]], int]:
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                return self.call_many(calls, block), block
+            except Exception as exc:
+                if not any(marker in str(exc).lower() for marker in _NOT_YET):
+                    raise
+                if time.monotonic() < deadline:
+                    time.sleep(0.015)
+                    continue
+                # The RPC is further behind the feed than we're willing to wait:
+                # read whatever it has so the bot keeps moving.
+                self.rpc_behind_timeouts += 1
+                latest = self.w3.eth.block_number
+                if latest >= block:
+                    raise  # it has the block but still can't read it: a real error
+                return self.call_many(calls, latest), latest
 
     def gas_price_wei(self) -> int:
         # Arbitrum's gas price barely moves; don't spend a request on it every block.
