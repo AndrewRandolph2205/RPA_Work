@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .amm import FEE_DENOMINATOR
@@ -48,6 +48,7 @@ class Stats:
     quoter_verified: int = 0
     quoter_verified_net_usd: float = 0.0  # scan mode: sum of verified gaps, each counted once
     verified_long_tail: int = 0  # of those, how many touch a discovered (long-tail) token
+    gap_lifetimes: List[int] = field(default_factory=list)  # blocks each verified gap stayed open
     quoter_rejected: int = 0
     # "Closest miss" diagnostics, reset after every summary.
     best_edge_pct: Optional[float] = None
@@ -94,6 +95,8 @@ class FlashBot:
         # Simulate mode: gaps that already passed and are still open. A real trade
         # would have closed them, so count each one once, not once per block.
         self._open_simulated: Set[Tuple] = set()
+        # Scan mode: verified gaps still open -> [first_block, last_block, route, net_usd]
+        self._open_gaps: Dict[frozenset, list] = {}
 
     # ----- analysis ---------------------------------------------------------
 
@@ -298,6 +301,7 @@ class FlashBot:
             if amount <= 0:
                 break
         s = self.stats
+        self._last_quote_verified = best_net >= self.cfg.risk.min_profit_usd
         if best_net >= self.cfg.risk.min_profit_usd:
             s.quoter_verified += 1
             s.quoter_verified_net_usd += best_net
@@ -347,8 +351,14 @@ class FlashBot:
                 continue  # another rotation of a cycle already handled this block
             keys.add(key)
             if self.executor is None:
-                if key not in self._prev_logged:  # check/log an opportunity once while it persists
+                if key in self._open_gaps:
+                    self._open_gaps[key][1] = block  # a verified gap is still there
+                elif key not in self._prev_logged:  # check/log an opportunity once while it persists
+                    self._last_quote_verified = False
                     self._log_opportunity(opp, self._quote_check(opp, prices))
+                    if self._last_quote_verified:
+                        self._open_gaps[key] = [block, block, opp.route.describe(self.symbols),
+                                                opp.net_usd]
                 continue
             if self._cooldown.get(key, -1) >= block or key in self._open_simulated:
                 continue
@@ -361,7 +371,20 @@ class FlashBot:
                 break  # the chain state changes after a trade; re-evaluate next block
         self._prev_logged = keys
         self._open_simulated &= keys
+        self._close_gaps(keys)
         return True
+
+    def _close_gaps(self, still_open: Set) -> None:
+        """Record how long each verified gap lasted once it's gone. Gaps that last
+        only a block or two are being taken by faster bots; ones that sit for many
+        blocks are ones a slower bot could realistically win."""
+        for key in [k for k in self._open_gaps if k not in still_open]:
+            first, last, route, net = self._open_gaps.pop(key)
+            lifetime = last - first + 1
+            self.stats.gap_lifetimes.append(lifetime)
+            self.journal.gap(route=route, first_block=first, last_block=last,
+                             blocks_open=lifetime, net_usd=round(net, 4))
+            log.info("gap closed after %d block(s) (~%.1fs): %s", lifetime, lifetime * 0.25, route)
 
     def summary(self) -> str:
         s = self.stats
@@ -387,6 +410,12 @@ class FlashBot:
             if s.verified_long_tail:
                 lines.append(f"    {s.verified_long_tail} of the verified gaps involve long-tail tokens; "
                              f"some may be transfer-tax tokens that only simulate mode can rule out")
+            if s.gap_lifetimes:
+                life = sorted(s.gap_lifetimes)
+                quick = sum(1 for n in life if n <= 2)
+                lines.append(f"  verified gaps closed: {len(life)}; gone within 2 blocks: {quick}; "
+                             f"lasted 4+ blocks (1s+): {sum(1 for n in life if n >= 4)}; "
+                             f"median {life[len(life) // 2]} blocks")
             lines.append(f"  verified total since start ${s.quoter_verified_net_usd:.2f} "
                          f"(${s.quoter_verified_net_usd / hours:.2f}/hr if the bot had won every one; "
                          f"it wouldn't)")

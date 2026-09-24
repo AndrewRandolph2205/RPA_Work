@@ -12,6 +12,7 @@ class Journal:
                           "net_usd", "decision"]
     TRADE_FIELDS = ["time", "block", "route", "amount_in", "tx_hash", "success",
                     "profit_usd", "gas_usd", "net_usd", "error"]
+    GAP_FIELDS = ["time", "route", "first_block", "last_block", "blocks_open", "net_usd"]
 
     def __init__(self, log_dir: str):
         self._dir = Path(log_dir)
@@ -28,6 +29,9 @@ class Journal:
 
     def opportunity(self, **row) -> None:
         self._append("opportunities.csv", self.OPPORTUNITY_FIELDS, row)
+
+    def gap(self, **row) -> None:
+        self._append("gaps.csv", self.GAP_FIELDS, row)
 
     def trade(self, **row) -> None:
         self._append("trades.csv", self.TRADE_FIELDS, row)

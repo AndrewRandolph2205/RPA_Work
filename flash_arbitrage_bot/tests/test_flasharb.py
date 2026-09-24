@@ -414,6 +414,30 @@ class TrackingTests(unittest.TestCase):
         self.assertIn("saw 33% of chain blocks", bot.summary())
 
 
+class GapLifetimeTests(unittest.TestCase):
+    def test_records_how_long_a_verified_gap_stays_open(self):
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        cheap = pool("cheap", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        dear = pool("dear", WETH, USDC, 1000 * E18, 2_050_000 * E6)
+        chain = FakeChain([cheap, dear])
+        quotes = []
+        chain.quote_route = lambda route, amount: (quotes.append(1), (route.amount_out(amount), True))[1]
+        bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
+        for _ in range(3):
+            bot.step()                      # gap open for 3 blocks
+        self.assertEqual(len(quotes), 3)    # quoted once (3 sizes), not again each block
+        dear.update_v2(1000 * E18, 2_000_000 * E6)   # someone closes it
+        bot.step()
+        with open(f"{tmp}/gaps.csv") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["blocks_open"], "3")
+        self.assertEqual(bot.stats.gap_lifetimes, [3])
+        self.assertIn("verified gaps closed: 1", bot.summary())
+        self.assertIn("median 3 blocks", bot.summary())
+
+
 class RotationTests(unittest.TestCase):
     def test_rotations_of_one_triangle_count_once(self):
         tmp = tempfile.mkdtemp()
