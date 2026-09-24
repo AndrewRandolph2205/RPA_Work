@@ -10,6 +10,7 @@ from flasharb.executor import SendResult, SimResult
 from flasharb.journal import Journal
 from flasharb.risk import RiskManager
 from flasharb.routes import Route, find_cycles, optimal_input, usd_prices
+from flasharb.simulator import Outcome
 
 WETH = "0x" + "1" * 40
 USDC = "0x" + "2" * 40
@@ -158,6 +159,29 @@ class RouteTests(unittest.TestCase):
         self.assertAlmostEqual(prices[ARB], 1.0, places=6)  # 500 WETH / 1M ARB at $2000
 
 
+def hop_amounts(route, amount):
+    out, x = [], amount
+    for p, t_in, _ in route.hops():
+        x = p.amount_out(t_in, x)
+        out.append(x)
+    return out
+
+
+def exact_checker(scale=1.0, method="sim", calls=None):
+    """Stand-in for Chain.verify_route: the model's own per-hop amounts, with the
+    last hop scaled (scale < 1 = reality came up short of the estimate)."""
+    def verify(route, sizes, block):
+        if calls is not None:
+            calls.append(list(sizes))
+        outcomes = []
+        for amount in sizes:
+            hops = hop_amounts(route, amount)
+            hops[-1] = hops[-1] * round(scale * 10 ** 6) // 10 ** 6
+            outcomes.append(Outcome(amount, block, method, hops, [0] * len(hops)))
+        return outcomes
+    return verify
+
+
 class FakeChain:
     def __init__(self, pools, vault=None, gas_price=10 ** 7):
         self.pools = pools
@@ -167,8 +191,8 @@ class FakeChain:
         self.gas_price = gas_price
         self.last_gas_price_wei = gas_price
 
-    def refresh(self):
-        self.block += 1
+    def refresh(self, block=None):
+        self.block = block if block is not None else self.block + 1
         return self.block
 
     def gas_price_wei(self):
@@ -182,17 +206,25 @@ class FakeExecutor:
         self.send_success = send_success
         self.simulated, self.sent = [], []
 
+        self._done = []
+
     def simulate(self, route, amount, min_profit):
         self.simulated.append(amount)
         if self.max_ok_amount is not None and amount > self.max_ok_amount:
             return SimResult(False, 0, "Unprofitable")
         return SimResult(True, 400_000)
 
-    def send(self, route, amount, min_profit, gas):
+    def submit(self, route, amount, min_profit):
         self.sent.append(amount)
-        if self.send_success:
-            return SendResult(True, "0xabc", route.amount_out(amount) - amount, gas * 10 ** 7)
-        return SendResult(False, "0xdef", 0, gas * 10 ** 7, "reverted on-chain")
+        tx_hash = f"0x{len(self.sent):064x}"
+        gas = 400_000 * 10 ** 7
+        self._done.append(SendResult(True, tx_hash, route.amount_out(amount) - amount, gas, "", 1, False)
+                          if self.send_success else SendResult(False, tx_hash, 0, gas, "reverted on-chain"))
+        return tx_hash
+
+    def poll_results(self):
+        done, self._done = self._done, []
+        return done
 
 
 def make_config(mode, tmp, **risk):
@@ -236,23 +268,26 @@ class BotTests(unittest.TestCase):
 
     def test_scan_verifies_candidates_with_quoter(self):
         chain = FakeChain([self.cheap, self.dear])
-        chain.quote_route = lambda route, amount: (route.amount_out(amount), True)
+        chain.verify_route = exact_checker()
         bot = self.bot("scan", chain=chain)
         bot.step()
         rows = self.rows("opportunities.csv")
-        self.assertTrue(all(r["decision"].startswith("quoter-verified") for r in rows))
+        self.assertTrue(rows and all(r["decision"].startswith("verified (sim") for r in rows))
         self.assertGreater(bot.stats.quoter_verified, 0)
         self.assertGreater(bot.stats.quoter_verified_net_usd, 0)
-        self.assertIn("exact quotes: verified=", bot.summary())
+        self.assertIn("exact checks (at the estimate's own block): verified=", bot.summary())
+        checks = self.rows("checks.csv")
+        self.assertEqual({r["result"] for r in checks}, {"verified"})
+        self.assertEqual(checks[0]["est_block"], checks[0]["check_block"])
         self.assertIn("/hr if the bot had won every one", bot.summary())
 
     def test_scan_rejects_candidates_the_quoter_disagrees_with(self):
         chain = FakeChain([self.cheap, self.dear])
-        chain.quote_route = lambda route, amount: (amount * 99 // 100, True)  # real: 1% loss
+        chain.verify_route = exact_checker(scale=0.97)  # reality: last hop 3% short
         bot = self.bot("scan", chain=chain)
         bot.step()
         rows = self.rows("opportunities.csv")
-        self.assertTrue(rows and all(r["decision"].startswith("rejected by quoter") for r in rows))
+        self.assertTrue(rows and all(r["decision"].startswith("rejected") for r in rows))
         self.assertEqual(bot.stats.quoter_verified, 0)
         self.assertIn("none real this period", bot.summary())
 
@@ -421,18 +456,21 @@ class GapLifetimeTests(unittest.TestCase):
         cheap = pool("cheap", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
         dear = pool("dear", WETH, USDC, 1000 * E18, 2_050_000 * E6)
         chain = FakeChain([cheap, dear])
-        quotes = []
-        chain.quote_route = lambda route, amount: (quotes.append(1), (route.amount_out(amount), True))[1]
+        calls = []
+        chain.verify_route = exact_checker(calls=calls)
         bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
         for _ in range(3):
             bot.step()                      # gap open for 3 blocks
-        self.assertEqual(len(quotes), 3)    # quoted once (3 sizes), not again each block
+        self.assertEqual(len(calls), 1)     # checked once (all sizes at once), not again each block
+        self.assertEqual(len(calls[0]), 4)  # full, 1/4, 1/16 and a tiny diagnostic size
         dear.update_v2(1000 * E18, 2_000_000 * E6)   # someone closes it
         bot.step()
         with open(f"{tmp}/gaps.csv") as fh:
             rows = list(csv.DictReader(fh))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["blocks_open"], "3")
+        self.assertEqual(rows[0]["closed_by_block"], str(chain.block))
+        self.assertEqual(set(rows[0]["pools"].split()), {cheap.address, dear.address})
         self.assertEqual(bot.stats.gap_lifetimes, [3])
         self.assertIn("verified gaps closed: 1", bot.summary())
         self.assertIn("median 3 blocks", bot.summary())
@@ -448,7 +486,7 @@ class RotationTests(unittest.TestCase):
         bc = pool("bc", USDC, ARB, 1_000_000 * E6, 1_000_000 * E18, fee=500)
         ca = pool("ca", ARB, WETH, 1_000_000 * E18, 530 * E18, fee=500)  # ARB overpriced here
         chain = FakeChain([ab, bc, ca], vault={WETH: 10 ** 30, USDC: 10 ** 30, ARB: 10 ** 30})
-        chain.quote_route = lambda route, amount: (route.amount_out(amount), True)
+        chain.verify_route = exact_checker()
         bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
         bot.step()
         self.assertEqual(bot.stats.quoter_verified, 1)
@@ -501,13 +539,13 @@ class DiscoveryTests(unittest.TestCase):
         b = pool("b", ARB, USDC, 1_000_000 * E18, 1_030_000 * E6, fee=500)
         cfg.flash_tokens = ["USDC"]
         chain = FakeChain([a, b])
-        chain.quote_route = lambda route, amount: (route.amount_out(amount), True)
+        chain.verify_route = exact_checker(method="quoter")  # quoters can't see transfer taxes
         chain.discovered = {ARB}
         bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
         bot.step()
         with open(f"{tmp}/opportunities.csv") as fh:
-            self.assertIn("long-tail token: confirm in simulate mode", fh.read())
-        self.assertIn("involve long-tail tokens", bot.summary())
+            self.assertIn("long-tail token: quoters can't see transfer taxes", fh.read())
+        self.assertIn("involve long-tail tokens that only quoters checked", bot.summary())
 
 
 class ConfigTests(unittest.TestCase):

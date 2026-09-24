@@ -6,7 +6,9 @@ difference is profit.
 
 Sizing uses the fact that a chain of constant-product swaps composes into a
 single function out(x) = A*x / (B + C*x). Profit out(x) - x is maximised at
-x* = (sqrt(A*B) - B) / C, and any profit exists only when A > B.
+x* = (sqrt(A*B) - B) / C, and any profit exists only when A > B. With a
+flash-loan fee rate f the loan costs x*(1+f), so x* = (sqrt(A*B/(1+f)) - B) / C
+and profit needs A > B*(1+f).
 """
 
 from __future__ import annotations
@@ -58,6 +60,14 @@ class Route:
         return " ".join(parts)
 
 
+def cycle_key(route: Route) -> Tuple[Tuple[str, str], ...]:
+    """Identity of a trade: the same whichever token it starts from
+    (A->B->C->A == B->C->A->B), different in the opposite direction."""
+    hops = tuple((p.address, t_in) for p, t_in, _ in route.hops())
+    first = min(range(len(hops)), key=lambda i: hops[i])
+    return hops[first:] + hops[:first]
+
+
 def find_cycles(pools: Iterable[Pool], start_tokens: Iterable[str], max_hops: int) -> List[Route]:
     """All simple cycles of 2..max_hops pools starting and ending at a start token."""
     by_token: Dict[str, List[Pool]] = defaultdict(list)
@@ -84,15 +94,17 @@ def find_cycles(pools: Iterable[Pool], start_tokens: Iterable[str], max_hops: in
     return routes
 
 
-def optimal_input(route: Route, max_input: int) -> Optional[int]:
+def optimal_input(route: Route, max_input: int, fee_rate: float = 0.0) -> Optional[int]:
     """Profit-maximising input amount (raw units), or None if never profitable."""
-    return optimal_input_from(route.mobius(), max_input)
+    return optimal_input_from(route.mobius(), max_input, fee_rate)
 
 
-def optimal_input_from(coeffs, max_input: int) -> Optional[int]:
+def optimal_input_from(coeffs, max_input: int, fee_rate: float = 0.0) -> Optional[int]:
+    """Best loan size given out(x) = A*x/(B+C*x) and a flash-loan fee rate."""
     if coeffs is None:
         return None
     a, b, c = coeffs
+    a = a / (1.0 + fee_rate)  # profit = out(x) - x*(1+f): same optimum as A/(1+f)
     if a <= b or c <= 0:
         return None
     x = (math.sqrt(a * b) - b) / c
@@ -131,6 +143,24 @@ def pool_liquidity_usd(pool: Pool, prices: Mapping[str, float], decimals: Mappin
     d0, d1 = pool.depth()
     return (d0 / 10 ** decimals[pool.token0] * prices[pool.token0]
             + d1 / 10 ** decimals[pool.token1] * prices[pool.token1])
+
+
+def pool_sides_usd(pool: Pool, prices: Mapping[str, float], decimals: Mapping[str, int]) -> Tuple[float, float]:
+    """Conservative USD value of each side (see Pool.depth); (0, 0) if unpriced.
+
+    A pool can be deep on one side and nearly empty on the other (a
+    concentrated pool whose price left its range, or one mispriced against the
+    rest of the market). Its marginal price then promises gaps it can't pay out."""
+    if pool.token0 not in prices or pool.token1 not in prices:
+        return 0.0, 0.0
+    d0, d1 = pool.depth()
+    return (d0 / 10 ** decimals[pool.token0] * prices[pool.token0],
+            d1 / 10 ** decimals[pool.token1] * prices[pool.token1])
+
+
+def flash_fee(amount_raw: int, fee_rate: float) -> int:
+    """Balancer rounds the fee up."""
+    return math.ceil(amount_raw * fee_rate) if fee_rate > 0 else 0
 
 
 def to_usd(amount_raw: int, token: str, prices: Mapping[str, float], decimals: Mapping[str, int]) -> float:

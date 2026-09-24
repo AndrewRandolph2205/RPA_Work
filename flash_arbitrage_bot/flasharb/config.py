@@ -10,7 +10,8 @@ from typing import Dict, List
 
 from .amm import POOL_TYPES, ROUTER_KINDS
 
-MODES = ("scan", "simulate", "live")
+MODES = ("scan", "paper", "simulate", "live")
+PAPER_TIMEBOOST = ("auto", "on", "off")
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -19,6 +20,9 @@ class RiskLimits:
     min_profit_usd: float = 0.50          # net of gas
     max_loan_usd: float = 25_000.0
     min_pool_liquidity_usd: float = 25_000.0
+    # Each side of a pool must hold at least this much (USD). Filters pools whose
+    # price promises a gap they can't pay out (e.g. a V3 pool out of its range).
+    min_pool_reserve_usd: float = 2_500.0
     max_gas_price_gwei: float = 1.0
     max_daily_gas_usd: float = 5.0        # gas burnt on reverted transactions
     max_consecutive_reverts: int = 3
@@ -68,6 +72,38 @@ class Config:
     route_rebuild_s: float = 3600.0
     summary_interval_s: float = 60.0
     log_dir: str = "logs"
+    # Arbitrum sequencer feed: learn about each block as it's sequenced instead of
+    # polling the RPC. Empty = poll. L2 block = feed sequence number + offset.
+    sequencer_feed_url: str = ""
+    feed_block_offset: int = 22207817
+    # Scan mode: check candidates with RouteSimulator (exact, one eth_call with a
+    # state override) instead of quoter contracts.
+    exact_sim: bool = True
+    # Scan mode: when a verified gap closes, find the transaction that closed it.
+    trace_closers: bool = True
+    # Live mode: where to send transactions (e.g. the sequencer's own endpoint);
+    # empty = the RPC_URL node. Reads always use RPC_URL.
+    send_rpc_url: str = ""
+    # Live mode: dry-run each trade with eth_call before sending (one more round
+    # trip). Off: send at once and let the contract's profit check revert it.
+    presimulate_live: bool = False
+    live_gas_limit: int = 2_000_000
+    # Paper mode: trade like live mode, but place paper orders instead of sending.
+    # A paper transaction lands this long after its block appeared: the bot's own
+    # decision time (measured from the sequencer feed), plus the trip to the
+    # sequencer, plus Timeboost's hold when it applies.
+    paper_send_latency_ms: float = 50.0      # one way, this machine -> the sequencer
+    # Timeboost holds ordinary transactions back only while someone controls the
+    # express lane; with no controller Arbitrum is first-come-first-served. "auto"
+    # adds the hold when the feed saw express-lane transactions within the last
+    # auction round, or can't tell; "on" and "off" force it.
+    paper_timeboost: str = "auto"
+    paper_timeboost_delay_ms: float = 200.0  # the hold itself
+    paper_block_time_ms: float = 250.0
+    # A competitor took the gap inside your landing block: order within a block is
+    # unknowable, so by default that counts as lost.
+    paper_same_block_wins: bool = False
+    paper_gas_units: int = 0                 # gas per paper trade, filled or reverted; 0 = gas_units_estimate
     risk: RiskLimits = field(default_factory=RiskLimits)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
 
@@ -144,6 +180,20 @@ def validate(cfg: Config) -> None:
         _check_address(f"dex {dex.name} router", dex.router)
         if dex.quoter:
             _check_address(f"dex {dex.name} quoter", dex.quoter)
+    if cfg.sequencer_feed_url and not cfg.sequencer_feed_url.startswith(("ws://", "wss://")):
+        raise ValueError("sequencer_feed_url must start with ws:// or wss://")
+    if cfg.send_rpc_url and not cfg.send_rpc_url.startswith(("http://", "https://")):
+        raise ValueError("send_rpc_url must start with http:// or https://")
+    if cfg.paper_timeboost not in PAPER_TIMEBOOST:
+        raise ValueError(f"paper_timeboost must be one of {PAPER_TIMEBOOST}, got {cfg.paper_timeboost!r}")
+    if cfg.paper_send_latency_ms < 0 or cfg.paper_timeboost_delay_ms < 0:
+        raise ValueError("paper_send_latency_ms and paper_timeboost_delay_ms can't be negative")
+    if cfg.paper_block_time_ms <= 0:
+        raise ValueError("paper_block_time_ms must be positive")
+    if cfg.paper_gas_units < 0:
+        raise ValueError("paper_gas_units can't be negative")
+    if cfg.live_gas_limit < 100_000:
+        raise ValueError("live_gas_limit is too low for a flash-loan arbitrage")
     if cfg.contract_address:
         _check_address("contract_address", cfg.contract_address)
     if cfg.owner_address:
