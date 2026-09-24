@@ -357,6 +357,20 @@ def cmd_run(cfg, args) -> int:
         from flasharb.feed import SequencerFeed
         feed = SequencerFeed(cfg.sequencer_feed_url, cfg.feed_block_offset)
         feed.start()
+    logs = None
+    if cfg.state_source == "logs":
+        if feed is None:
+            print('state_source = "logs" needs sequencer_feed_url (blocks come from the feed); '
+                  "reading pools over RPC instead.")
+        else:
+            from flasharb.logstate import LogStream, event_topics, ws_url_from_http
+            ws_url = os.environ.get(cfg.ws_rpc_url_env, "").strip() or ws_url_from_http(need_env(cfg.rpc_url_env))
+            logs = LogStream(ws_url, event_topics(lambda sig: chain.Web3.keccak(text=sig)),
+                             settle_ms=cfg.logs_settle_ms)
+            logs.start()
+            chain.attach_logs(logs)
+            print(f"Pool state: following pool events over a websocket; full re-read every "
+                  f"{cfg.logs_resync_s:.0f}s to check for drift.")
     paper = None
     if cfg.mode == "paper":
         from flasharb.paper import PaperTrader
@@ -377,6 +391,8 @@ def cmd_run(cfg, args) -> int:
     finally:
         if feed is not None:
             feed.stop()
+        if logs is not None:
+            logs.stop()
     return 0
 
 

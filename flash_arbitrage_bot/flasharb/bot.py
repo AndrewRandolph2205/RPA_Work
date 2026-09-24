@@ -164,6 +164,7 @@ class FlashBot:
         self.excluded: Dict[str, str] = self._load_excluded()
         # Feed block numbers are trusted only once they match the RPC's.
         self._feed_ok = False
+        self._state_prev: Dict[str, int] = {}  # chain.state_stats at the last summary
         self._feed_checked_at = float("-inf")
         self._feed_given_up = False
 
@@ -834,8 +835,11 @@ class FlashBot:
         feed, s = self.feed, self.stats
         parts = [f"feed: {'connected' if feed.healthy() else 'DOWN (polling the RPC)'}"]
         if s.rpc_lag_ms:
-            parts.append(f"pools read {_percentile(s.rpc_lag_ms, 0.5):.0f}ms after the feed announced each block "
+            parts.append(f"pools ready {_percentile(s.rpc_lag_ms, 0.5):.0f}ms after the feed announced each block "
                          f"(median; p90 {_percentile(s.rpc_lag_ms, 0.9):.0f}ms)")
+        state = self._state_line()
+        if state:
+            parts.append(state)
         fs = feed.stats
         if fs.blocks:
             parts.append(f"express-lane txs in {100 * fs.express_blocks / fs.blocks:.0f}% of blocks")
@@ -844,6 +848,22 @@ class FlashBot:
             parts.append(f"RPC fell >0.75s behind {behind}x since start")
         fs.reset()
         return "; ".join(parts)
+
+    def _state_line(self) -> str:
+        """Where pool state came from this period (state_source = "logs")."""
+        chain = self.chain
+        if getattr(chain, "logs", None) is None:
+            return ""
+        now = dict(chain.state_stats)
+        prev, self._state_prev = self._state_prev, now
+        d = {k: v - prev.get(k, 0) for k, v in now.items()}
+        text = (f"state: {d['logs']} blocks from pool events, {d['rpc']} RPC reads ({d['resyncs']} resyncs, "
+                f"{d['timeouts']} event timeouts)")
+        if not chain.logs.ready():
+            text += ", event stream DOWN"
+        if chain.last_drift is not None:
+            text += f", last resync drift {chain.last_drift[0]}/{chain.last_drift[1]} pools"
+        return text
 
     def _feed_usable(self) -> bool:
         """True when blocks should come from the feed. Its block numbers are checked

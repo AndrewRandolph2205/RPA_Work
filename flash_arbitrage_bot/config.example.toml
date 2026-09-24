@@ -45,6 +45,13 @@ log_dir = "logs"
 # to that exact block. Leave empty to poll the RPC instead.
 sequencer_feed_url = "wss://arb1-feed.arbitrum.io/feed"
 feed_block_offset = 22207817    # Arbitrum One: block = feed sequence number + this (checked against the RPC)
+# Pool state per block: "rpc" re-reads every tracked pool (one Multicall, ~170ms after the
+# feed); "logs" follows the pools' events (Sync/Swap/Mint/Burn/fees) pushed over a websocket
+# and re-reads everything only every logs_resync_s, logging any drift it finds.
+state_source = "logs"
+ws_rpc_url_env = "WS_RPC_URL"   # unset = RPC_URL with https:// -> wss:// (works for Alchemy)
+logs_settle_ms = 20             # after the node's newHeads, wait this long for the block's events
+logs_resync_s = 60
 exact_sim = true                # scan: check candidates by simulating the real swaps (eth_call state override)
 trace_closers = true            # scan: find the transaction that closed each verified gap (logs/closers.csv)
 # Live mode only:

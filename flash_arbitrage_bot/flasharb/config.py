@@ -12,6 +12,7 @@ from .amm import POOL_TYPES, ROUTER_KINDS
 
 MODES = ("scan", "paper", "simulate", "live")
 PAPER_TIMEBOOST = ("auto", "on", "off")
+STATE_SOURCES = ("rpc", "logs")
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -76,6 +77,13 @@ class Config:
     # polling the RPC. Empty = poll. L2 block = feed sequence number + offset.
     sequencer_feed_url: str = ""
     feed_block_offset: int = 22207817
+    # Where each block's pool state comes from: "rpc" re-reads every tracked pool
+    # (one Multicall per block); "logs" follows the pools' events over a websocket
+    # subscription and re-reads them only every logs_resync_s (needs the feed).
+    state_source: str = "rpc"
+    ws_rpc_url_env: str = "WS_RPC_URL"   # unset = RPC_URL with https:// -> wss://
+    logs_settle_ms: float = 20.0         # after the node's newHeads, wait this long for the block's events
+    logs_resync_s: float = 60.0          # re-read the pools this often and measure drift
     # Scan mode: check candidates with RouteSimulator (exact, one eth_call with a
     # state override) instead of quoter contracts.
     exact_sim: bool = True
@@ -182,6 +190,10 @@ def validate(cfg: Config) -> None:
             _check_address(f"dex {dex.name} quoter", dex.quoter)
     if cfg.sequencer_feed_url and not cfg.sequencer_feed_url.startswith(("ws://", "wss://")):
         raise ValueError("sequencer_feed_url must start with ws:// or wss://")
+    if cfg.state_source not in STATE_SOURCES:
+        raise ValueError(f"state_source must be one of {STATE_SOURCES}, got {cfg.state_source!r}")
+    if cfg.logs_settle_ms < 0 or cfg.logs_resync_s <= 0:
+        raise ValueError("logs_settle_ms can't be negative and logs_resync_s must be positive")
     if cfg.send_rpc_url and not cfg.send_rpc_url.startswith(("http://", "https://")):
         raise ValueError("send_rpc_url must start with http:// or https://")
     if cfg.paper_timeboost not in PAPER_TIMEBOOST:

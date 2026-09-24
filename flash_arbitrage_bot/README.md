@@ -171,7 +171,7 @@ The minute summary looks like:
 
 ```
 mode=scan blocks=240 (saw 100% of chain blocks) source=feed routes=2904 candidates=52 slowest_block_eval=7ms
-  feed: connected; pools read 60ms after the feed announced each block (median; p90 120ms); express-lane txs in 20% of blocks
+  feed: connected; pools ready 60ms after the feed announced each block (median; p90 120ms); state: 236 blocks from pool events, 4 RPC reads (1 resyncs, 3 event timeouts), last resync drift 0/1400 pools; express-lane txs in 20% of blocks
   best trade after gas (estimate) $+0.12 (...), marginal edge +0.050%; needs >= $0.50
     size $900, profit $0.150 - flash fee $0.000 (0.0 bps) - gas $0.024
   exact checks (at the estimate's own block): verified=1 rejected=3; best $0.61 (...); slowest check 90ms
@@ -179,6 +179,17 @@ mode=scan blocks=240 (saw 100% of chain blocks) source=feed routes=2904 candidat
   verified gaps closed: 1; gone within 2 blocks: 1; lasted 4+ blocks (1s+): 0; median 1 blocks
   closers found: 1 of 1 gaps (express lane 1, regular 0); arbitrage bots 1; landed in the very next block 1 (1 among its first 2 transactions)
 ```
+
+**Pool state from events (`state_source = "logs"`).** Instead of re-reading
+every tracked pool each block (one Multicall round trip, retried while the RPC
+catches up with the feed), the bot subscribes over a websocket to the pools'
+own events (V2 `Sync`, V3/Algebra `Swap`/`Mint`/`Burn`, dynamic-fee changes)
+and applies each block's events as soon as the node pushes them. It re-reads
+all pools after every reconnect and every `logs_resync_s`, and the summary's
+`drift` shows how many pools the events had gotten wrong by then (it should
+stay at 0). `pools ready ... after the feed` is the number to compare against
+`state_source = "rpc"`. The websocket URL comes from `WS_RPC_URL`, or from
+`RPC_URL` with `https://` swapped for `wss://`.
 
 Trust the `exact checks` line. The estimate lines show how close the fast pass
 came; "best trade" is ranked by dollars at the best size, so a thin pool with

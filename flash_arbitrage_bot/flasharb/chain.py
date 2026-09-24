@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import discovery
 from .amm import Pool
+from .logstate import LATEST, apply_event, drifted, pool_state
 from .config import Config
 from .routes import flash_fee, usd_prices
 from .simulator import (CALLER, SIM_ADDRESS, SIMULATE_SELECTOR, SIMULATE_TYPES, Outcome, decode_result,
@@ -90,6 +91,14 @@ class Chain:
         self.flash_fee_rate = 0.0       # Balancer flash-loan fee, as a fraction (read in load())
         self.sim_supported: Optional[bool] = None  # None until the first exact check
         self.rpc_behind_timeouts = 0    # pinned reads that gave up waiting for the RPC
+        # Push-based state (state_source = "logs"), see logstate.py.
+        self.logs = None                # LogStream, attached by attach_logs()
+        self._logs_generation = -1      # the stream generation the pools were last read at
+        self._logs_synced_at = float("-inf")
+        self._marks: Dict[str, Tuple[int, int]] = {}  # pool -> (block, log index) its state reflects
+        self.state_stats = {"logs": 0, "rpc": 0, "resyncs": 0, "timeouts": 0, "stale_events": 0,
+                            "unapplied": 0}
+        self.last_drift: Optional[Tuple[int, int]] = None  # (pools that differed, pools compared)
 
     # ----- helpers ----------------------------------------------------------
 
@@ -445,13 +454,81 @@ class Chain:
         """Re-read every discovered pool, not just the tracked ones."""
         return self.refresh(full=True)
 
-    def refresh(self, full: bool = False, block: Optional[int] = None, wait_s: float = 0.75) -> int:
-        """Re-read the tracked pools (or all, if full) and the vault's balances if
-        a new block exists. Returns the block that was read.
+    def attach_logs(self, stream) -> None:
+        """Follow pool events from `stream` (a started LogStream) instead of
+        re-reading every tracked pool each block."""
+        self.logs = stream
 
-        With `block` (announced by the sequencer feed) the read is pinned to it,
-        retrying for up to `wait_s` while the RPC node catches up; feeds run
-        ahead of RPC providers. Without it, the RPC's latest block is read."""
+    def refresh(self, full: bool = False, block: Optional[int] = None, wait_s: float = 0.75) -> int:
+        """Bring the tracked pools (or all, if full) up to date with a new block.
+        Returns the block the pools now reflect.
+
+        With `block` (announced by the sequencer feed) the state is pinned to it.
+        By default that's one Multicall read, retried for up to `wait_s` while the
+        RPC node catches up (feeds run ahead of RPC providers). With a pool event
+        stream attached, the block's events are applied instead and the pools are
+        only re-read periodically. Without `block`, the RPC's latest block is read."""
+        if self.logs is not None and block is not None and not full and self.tracked is not None:
+            served = self._refresh_from_logs(block, wait_s)
+            if served is not None:
+                return served
+        return self._refresh_rpc(full, block, wait_s)
+
+    def _refresh_from_logs(self, block: int, wait_s: float) -> Optional[int]:
+        """Serve `block` from pool events. None = read it over RPC instead."""
+        stream = self.logs
+        stream.watch(self.tracked)
+        if not stream.ready():
+            return None  # (re)connecting: RPC reads until the subscription is live
+        if block == self._last_block:
+            return block
+        generation = stream.generation
+        periodic = time.monotonic() - self._logs_synced_at >= self.cfg.logs_resync_s
+        if generation != self._logs_generation or periodic:
+            before = None
+            if generation == self._logs_generation and stream.wait_ready(block, wait_s):
+                self._apply_events(stream.take(block))  # state as events built it...
+                before = {a: pool_state(p) for a, p in self._tracked_pools().items()}
+            got = self._refresh_rpc(False, block, wait_s)  # ...vs as the RPC reads it
+            if before is not None and got == block:
+                changed = drifted(before, self._tracked_pools().values())
+                self.last_drift = (len(changed), len(before))
+                if changed:
+                    log.info("pool events drifted from the RPC on %d of %d pools (e.g. %s); resynced",
+                             len(changed), len(before), ", ".join(changed[:3]))
+            self._logs_generation = generation
+            self._logs_synced_at = time.monotonic()
+            self.state_stats["resyncs"] += 1
+            return got
+        if not stream.wait_ready(block, wait_s):
+            self.state_stats["timeouts"] += 1
+            return None
+        self._apply_events(stream.take(block))
+        if stream.generation != generation:
+            return None  # a reorg or reconnect landed meanwhile: read it for real
+        self._last_block = block
+        self.state_stats["logs"] += 1
+        return block
+
+    def _tracked_pools(self) -> Dict[str, Pool]:
+        return {p.address: p for p in self.pools if self.tracked is None or p.address in self.tracked}
+
+    def _apply_events(self, events) -> None:
+        pools = self._tracked_pools()
+        for event in events:
+            pool = pools.get(event.pool)
+            if pool is None:
+                continue
+            if event.position <= self._marks.get(event.pool, (-1, -1)):
+                self.state_stats["stale_events"] += 1  # already part of an RPC read
+                continue
+            if not apply_event(pool, event):
+                self.state_stats["unapplied"] += 1
+                self.logs.invalidate()  # can't follow this pool: re-read everything next block
+                continue
+            self._marks[event.pool] = event.position
+
+    def _refresh_rpc(self, full: bool, block: Optional[int], wait_s: float) -> int:
         if block is None:
             block = self.w3.eth.block_number
         if block == self._last_block and not full:
@@ -496,19 +573,26 @@ class Chain:
                     pool.update_v3(0, 0)
                 elif pool.kind == "v3":
                     # Only the first two slot0 fields are read; forks differ after that.
-                    sqrt_price, _ = self.decode(["uint160", "int24"], state[:64])
+                    sqrt_price, pool.tick = self.decode(["uint160", "int24"], state[:64])
                     pool.update_v3(sqrt_price, self.decode(["uint128"], liq)[0])
                 else:
                     # Algebra (Camelot V3) globalState: price, tick, feeZto, feeOtz, ...
                     # Fees are already in parts per million and differ by direction.
-                    sqrt_price, _, fee_zto, fee_otz = self.decode(
+                    sqrt_price, pool.tick, fee_zto, fee_otz = self.decode(
                         ["uint160", "int24", "uint16", "uint16"], state[:128])
                     pool.update_v3(sqrt_price, self.decode(["uint128"], liq)[0])
                     pool.fee_ppm, pool.fee1_ppm = fee_zto, fee_otz
         for token in flash_tokens:
             data = next(results)
             self.vault_balances[token] = self.decode(["uint256"], data)[0] if data else 0
+        for pool in pools:
+            self._marks[pool.address] = (block, LATEST)
+        if self.logs is not None:
+            self.logs.take(block)  # events up to here are part of this read
+        if self.logs is not None and self._last_block is not None and block < self._last_block:
+            self.logs.invalidate()  # an older read replaced newer event-built state
         self._last_block = block
+        self.state_stats["rpc"] += 1
         return block
 
     def _read_at(self, calls, block: int, wait_s: float) -> Tuple[List[Optional[bytes]], int]:

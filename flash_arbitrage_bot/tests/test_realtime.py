@@ -133,7 +133,7 @@ class FeedDrivenBotTests(unittest.TestCase):
         self.assertEqual(chain.block, 503)  # read pinned to exactly the announced blocks
         summary = bot.summary()
         self.assertIn("source=feed", summary)
-        self.assertIn("pools read 42ms after the feed announced each block", summary)
+        self.assertIn("pools ready 42ms after the feed announced each block", summary)
 
 
 class FakeHistory:

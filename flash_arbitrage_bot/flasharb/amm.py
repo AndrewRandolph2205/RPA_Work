@@ -46,6 +46,11 @@ class Pool:
     balance1: Optional[int] = None
     quoter: str = ""  # concentrated pools: quoter contract used to price trades exactly
     fee1_ppm: Optional[int] = None  # fee when token1 is sold, for per-direction fees
+    # Concentrated pools: the raw state behind the virtual reserves, kept so
+    # pool events (logstate.py) can update them.
+    sqrt_price_x96: Optional[int] = None
+    liquidity: Optional[int] = None
+    tick: Optional[int] = None
 
     def __hash__(self) -> int:
         return hash(self.address)
@@ -80,6 +85,7 @@ class Pool:
         self.reserve0, self.reserve1 = int(reserve0), int(reserve1)
 
     def update_v3(self, sqrt_price_x96: int, liquidity: int) -> None:
+        self.sqrt_price_x96, self.liquidity = int(sqrt_price_x96), int(liquidity)
         if sqrt_price_x96 <= 0 or liquidity <= 0:
             self.reserve0 = self.reserve1 = 0
             return

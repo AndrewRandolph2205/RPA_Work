@@ -7,7 +7,7 @@ from typing import Optional
 
 # RPC URLs usually end in the API key: https://host/v2/<key>. Keep the first 4
 # characters of the last path segment so different keys are still tellable apart.
-_URL_KEY = re.compile(r"(https?://\S*/)([^\s/]{4})[^\s/]+")
+_URL_KEY = re.compile(r"((?:https?|wss?)://\S*/)([^\s/]{4})[^\s/]+")
 
 
 def mask_secrets(text: str) -> str:
