@@ -242,7 +242,9 @@ class BotTests(unittest.TestCase):
         rows = self.rows("opportunities.csv")
         self.assertTrue(all(r["decision"].startswith("quoter-verified") for r in rows))
         self.assertGreater(bot.stats.quoter_verified, 0)
+        self.assertGreater(bot.stats.quoter_verified_net_usd, 0)
         self.assertIn("exact quotes: verified=", bot.summary())
+        self.assertIn("/hr if the bot had won every one", bot.summary())
 
     def test_scan_rejects_candidates_the_quoter_disagrees_with(self):
         chain = FakeChain([self.cheap, self.dear])

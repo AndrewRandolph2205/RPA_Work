@@ -46,6 +46,7 @@ class Stats:
     gas_spent_usd: float = 0.0
     simulated_net_usd: float = 0.0
     quoter_verified: int = 0
+    quoter_verified_net_usd: float = 0.0  # scan mode: sum of verified gaps, each counted once
     quoter_rejected: int = 0
     # "Closest miss" diagnostics, reset after every summary.
     best_edge_pct: Optional[float] = None
@@ -298,6 +299,7 @@ class FlashBot:
         s = self.stats
         if best_net >= self.cfg.risk.min_profit_usd:
             s.quoter_verified += 1
+            s.quoter_verified_net_usd += best_net
             if s.best_verified_usd is None or best_net > s.best_verified_usd:
                 s.best_verified_usd = best_net
                 s.best_verified_route = opp.route.describe(self.symbols)
@@ -372,6 +374,9 @@ class FlashBot:
                     if s.best_verified_usd is not None else "none real this period")
             lines.append(f"  exact quotes: verified={s.quoter_verified} "
                          f"rejected={s.quoter_rejected}; {best}")
+            lines.append(f"  verified total since start ${s.quoter_verified_net_usd:.2f} "
+                         f"(${s.quoter_verified_net_usd / hours:.2f}/hr if the bot had won every one; "
+                         f"it wouldn't)")
         if self.cfg.mode != "scan":
             lines.append(f"  simulations passed={s.sim_passed} failed={s.sim_failed}")
         if self.cfg.mode == "simulate":
