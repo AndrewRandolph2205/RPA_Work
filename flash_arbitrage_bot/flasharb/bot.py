@@ -340,7 +340,11 @@ class FlashBot:
 
         keys = set()
         for opp in opps:
-            key = tuple(p.address for p in opp.route.pools) + (opp.route.start,)
+            # A cycle is the same trade whichever token it starts from
+            # (A->B->C->A == B->C->A->B), so key it by its pools only.
+            key = frozenset(p.address for p in opp.route.pools)
+            if key in keys:
+                continue  # another rotation of a cycle already handled this block
             keys.add(key)
             if self.executor is None:
                 if key not in self._prev_logged:  # check/log an opportunity once while it persists

@@ -414,6 +414,24 @@ class TrackingTests(unittest.TestCase):
         self.assertIn("saw 33% of chain blocks", bot.summary())
 
 
+class RotationTests(unittest.TestCase):
+    def test_rotations_of_one_triangle_count_once(self):
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        cfg.max_hops = 3
+        cfg.flash_tokens = ["WETH", "USDC", "ARB"]
+        ab = pool("ab", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        bc = pool("bc", USDC, ARB, 1_000_000 * E6, 1_000_000 * E18, fee=500)
+        ca = pool("ca", ARB, WETH, 1_000_000 * E18, 530 * E18, fee=500)  # ARB overpriced here
+        chain = FakeChain([ab, bc, ca], vault={WETH: 10 ** 30, USDC: 10 ** 30, ARB: 10 ** 30})
+        chain.quote_route = lambda route, amount: (route.amount_out(amount), True)
+        bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp))
+        bot.step()
+        self.assertEqual(bot.stats.quoter_verified, 1)
+        with open(f"{tmp}/opportunities.csv") as fh:
+            self.assertEqual(len(list(csv.DictReader(fh))), 1)
+
+
 class DiscoveryTests(unittest.TestCase):
     NEW, TINY, SCAM = "0x" + "a" * 40, "0x" + "b" * 40, "0x" + "c" * 40
 
