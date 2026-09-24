@@ -59,6 +59,24 @@ def connect(cfg):
     return chain
 
 
+def load_with_retries(chain, cfg, attempts: int = 4) -> None:
+    """Pool discovery sends a burst of requests; ride out a temporary refusal."""
+    import time
+    from flasharb.errors import describe
+    for attempt in range(1, attempts + 1):
+        try:
+            chain.load()
+            return
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            if attempt == attempts:
+                sys.exit(explain_rpc_error(exc, cfg))
+            wait = 5 * attempt
+            print(f"Loading pools failed ({describe(exc)}); retrying in {wait}s...")
+            time.sleep(wait)
+
+
 def mask_url(url: str) -> str:
     """Hide the API key (usually the last path segment) when printing an RPC URL."""
     head, _, tail = url.rstrip("/").rpartition("/")
@@ -67,7 +85,8 @@ def mask_url(url: str) -> str:
 
 def explain_rpc_error(exc: Exception, cfg) -> str:
     url = os.environ.get(cfg.rpc_url_env, "")
-    text = str(exc).replace(url, mask_url(url))
+    from flasharb.errors import mask_secrets
+    text = mask_secrets(str(exc).replace(url, mask_url(url)))
     status = getattr(getattr(exc, "response", None), "status_code", None)
     hints = {
         401: "The RPC rejected the API key. Check it was copied completely.",
@@ -145,7 +164,7 @@ def cmd_selftest(cfg, args) -> int:
         print(f"  [{'FAIL' if label in missing else ' OK '}] {label} has contract code")
     ok &= not missing
 
-    chain.load()
+    load_with_retries(chain, cfg)
     chain.refresh()
     print(f"  [ OK ] discovered {len(chain.pools)} pools")
 
@@ -198,14 +217,13 @@ def cmd_run(cfg, args) -> int:
         sys.exit(f'--live passed but config mode is "{cfg.mode}". Refusing to trade.')
 
     chain = connect(cfg)
-    chain.load()
+    load_with_retries(chain, cfg)
     executor = None
     if cfg.mode in ("simulate", "live"):
         if not cfg.contract_address:
             sys.exit("contract_address is empty: run `python run_flash.py deploy` first.")
         key = need_env("PRIVATE_KEY") if cfg.mode == "live" else os.environ.get("PRIVATE_KEY") or None
         executor = ContractExecutor(chain, cfg.contract_address, cfg.owner_address, key)
-    chain.refresh()
     bot = FlashBot(cfg, chain, executor, RiskManager(cfg.risk), Journal(cfg.log_dir))
     bot.run(max_blocks=args.blocks)
     return 0

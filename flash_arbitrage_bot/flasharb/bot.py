@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .amm import FEE_DENOMINATOR
 from .config import Config
+from .errors import describe, http_status
 from .journal import Journal
 from .risk import RiskManager
 from .routes import (Route, find_cycles, from_usd, optimal_input_from, pool_liquidity_usd, to_usd,
@@ -357,13 +358,24 @@ class FlashBot:
         return "\n".join(lines)
 
     def run(self, max_blocks: Optional[int] = None) -> None:
+        errors_in_a_row = 0
         while max_blocks is None or self.stats.blocks < max_blocks:
             try:
                 if not self.step():
                     time.sleep(self.cfg.poll_interval_s)
-            except Exception:
-                log.exception("step failed")
-                time.sleep(max(self.cfg.poll_interval_s, 1.0))
+                errors_in_a_row = 0
+            except Exception as exc:
+                # Usually a temporary RPC problem (rate limit, network blip). Back off
+                # exponentially instead of crashing or hammering the endpoint.
+                errors_in_a_row += 1
+                wait = min(60.0, 2.0 ** errors_in_a_row)
+                status = http_status(exc)
+                hint = {403: " (RPC refused access; is this network enabled for your key?)",
+                        429: " (rate limited)"}.get(status, "")
+                log.warning("block failed%s: %s; retrying in %.0fs", hint, describe(exc), wait)
+                if status is None and not isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+                    log.debug("details", exc_info=True)
+                time.sleep(wait)
             if self.risk.halted_reason:
                 log.error("HALTED: %s", self.risk.halted_reason)
                 break

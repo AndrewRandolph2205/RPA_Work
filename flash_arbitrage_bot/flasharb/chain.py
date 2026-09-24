@@ -37,6 +37,12 @@ class Chain:
         self.Web3 = Web3
         self.cfg = cfg
         self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 15}))
+        # web3's validation middleware asks the node for the chain id before every
+        # call, doubling traffic. check_network() verifies the chain once instead.
+        try:
+            self.w3.middleware_onion.remove("validation")
+        except Exception:
+            pass
         self._mc = self.w3.eth.contract(address=self.cs(MULTICALL3), abi=MULTICALL3_ABI)
         self.pools: List[Pool] = []
         self.decimals: Dict[str, int] = {}

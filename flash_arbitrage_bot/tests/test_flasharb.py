@@ -348,6 +348,43 @@ class BotTests(unittest.TestCase):
         self.assertLess(bot.stats.realized_net_usd, 0)  # only gas lost
 
 
+class ErrorHandlingTests(unittest.TestCase):
+    def test_api_keys_are_masked(self):
+        from flasharb.errors import describe, mask_secrets
+        text = "403 Forbidden for url: https://arb-mainnet.g.alchemy.com/v2/alch_SECRET123456"
+        self.assertNotIn("SECRET123456", mask_secrets(text))
+        self.assertIn("/v2/alch...", mask_secrets(text))
+        self.assertNotIn("SECRET", describe(RuntimeError(text)))
+
+    def test_bot_backs_off_on_rpc_errors_instead_of_crashing(self):
+        from unittest import mock
+        import flasharb.bot as botmod
+
+        class FlakyChain(FakeChain):
+            failures = 2
+
+            def refresh(self):
+                if self.failures:
+                    self.failures -= 1
+                    exc = RuntimeError("403 Forbidden for url: https://x.io/v2/alch_SECRETKEY")
+                    exc.response = type("R", (), {"status_code": 403})()
+                    raise exc
+                return super().refresh()
+
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        cheap = pool("cheap", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        bot = FlashBot(cfg, FlakyChain([cheap]), None, RiskManager(cfg.risk), Journal(tmp))
+        sleeps = []
+        with mock.patch.object(botmod.time, "sleep", sleeps.append), \
+                self.assertLogs("flasharb.bot", level="WARNING") as logs:
+            bot.run(max_blocks=1)
+        self.assertEqual(bot.stats.blocks, 1)
+        self.assertEqual(sleeps[:2], [2.0, 4.0])  # exponential backoff
+        self.assertFalse(any("SECRETKEY" in line for line in logs.output))
+        self.assertTrue(any("403" in line for line in logs.output))
+
+
 class ConfigTests(unittest.TestCase):
     def test_rejects_bad_address_and_unknown_symbol(self):
         cfg = make_config("scan", tempfile.mkdtemp())
