@@ -125,10 +125,11 @@ class FlashBot:
         for p in self.chain.pools:
             if p.address not in liquid or not p.active:
                 continue
-            g = math.log((FEE_DENOMINATOR - p.fee_ppm) / FEE_DENOMINATOR)
+            g0 = math.log((FEE_DENOMINATOR - p.fee_for(p.token0)) / FEE_DENOMINATOR)
+            g1 = math.log((FEE_DENOMINATOR - p.fee_for(p.token1)) / FEE_DENOMINATOR)
             ratio = math.log(p.reserve1) - math.log(p.reserve0)
-            rates[(p.address, p.token0)] = g + ratio
-            rates[(p.address, p.token1)] = g - ratio
+            rates[(p.address, p.token0)] = g0 + ratio
+            rates[(p.address, p.token1)] = g1 - ratio
         return rates
 
     def find_opportunities(self, prices: Dict[str, float], gas_price_wei: int) -> List[Opportunity]:

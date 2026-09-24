@@ -46,7 +46,7 @@ class Route:
             r_in, r_out = pool.reserves_for(token_in)
             if r_in <= 0 or r_out <= 0:
                 return None
-            g = (FEE_DENOMINATOR - pool.fee_ppm) / FEE_DENOMINATOR
+            g = (FEE_DENOMINATOR - pool.fee_for(token_in)) / FEE_DENOMINATOR
             a, b, c = g * r_out, float(r_in), g
             a_acc, b_acc, c_acc = a * a_acc, b * b_acc, b * c_acc + c * a_acc
         return a_acc, b_acc, c_acc

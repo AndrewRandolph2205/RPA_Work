@@ -70,9 +70,36 @@ interface IV3SwapRouter {
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256);
 }
 
+/// Camelot V2 router: V2-style, but takes a referrer and returns nothing.
+interface ICamelotRouter {
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        address referrer,
+        uint256 deadline
+    ) external;
+}
+
+/// Algebra swap router (Camelot V3): no fee field, one pool per pair.
+interface IAlgebraSwapRouter {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 limitSqrtPrice;
+    }
+
+    function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256);
+}
+
 contract FlashArbitrage {
     struct Step {
-        uint8 kind; // 0 = Uniswap V2 router, 1 = V3 SwapRouter02, 2 = V3 SwapRouter (with deadline)
+        uint8 kind; // 0 = Uniswap V2, 1 = V3 SwapRouter02, 2 = V3 SwapRouter, 3 = Camelot V2, 4 = Algebra
         address router;
         address tokenIn;
         address tokenOut;
@@ -82,6 +109,8 @@ contract FlashArbitrage {
     uint8 internal constant KIND_V2 = 0;
     uint8 internal constant KIND_V3_ROUTER02 = 1;
     uint8 internal constant KIND_V3_ROUTER = 2;
+    uint8 internal constant KIND_CAMELOT_V2 = 3;
+    uint8 internal constant KIND_ALGEBRA = 4;
 
     address public immutable owner;
     IBalancerVault public immutable vault;
@@ -201,6 +230,25 @@ contract FlashArbitrage {
                     amountIn: amountIn,
                     amountOutMinimum: 0,
                     sqrtPriceLimitX96: 0
+                })
+            );
+        } else if (s.kind == KIND_CAMELOT_V2) {
+            address[] memory path = new address[](2);
+            path[0] = s.tokenIn;
+            path[1] = s.tokenOut;
+            ICamelotRouter(s.router).swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                amountIn, 0, path, address(this), address(0), block.timestamp
+            );
+        } else if (s.kind == KIND_ALGEBRA) {
+            IAlgebraSwapRouter(s.router).exactInputSingle(
+                IAlgebraSwapRouter.ExactInputSingleParams({
+                    tokenIn: s.tokenIn,
+                    tokenOut: s.tokenOut,
+                    recipient: address(this),
+                    deadline: block.timestamp,
+                    amountIn: amountIn,
+                    amountOutMinimum: 0,
+                    limitSqrtPrice: 0
                 })
             );
         } else {

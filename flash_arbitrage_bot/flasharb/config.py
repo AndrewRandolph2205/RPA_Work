@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Dict, List
 
-from .amm import ROUTER_KINDS
+from .amm import POOL_TYPES, ROUTER_KINDS
 
 MODES = ("scan", "simulate", "live")
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -27,7 +27,7 @@ class RiskLimits:
 @dataclass
 class DexConfig:
     name: str
-    type: str  # "v2" | "v3"
+    type: str  # one of amm.POOL_TYPES
     factory: str
     router: str
     router_kind: str
@@ -118,8 +118,8 @@ def validate(cfg: Config) -> None:
     if not cfg.dexes:
         raise ValueError("configure at least one [dexes.<name>] section")
     for dex in cfg.dexes.values():
-        if dex.type not in ("v2", "v3"):
-            raise ValueError(f"dex {dex.name}: type must be 'v2' or 'v3'")
+        if dex.type not in POOL_TYPES:
+            raise ValueError(f"dex {dex.name}: type must be one of {POOL_TYPES}")
         if dex.router_kind not in ROUTER_KINDS:
             raise ValueError(f"dex {dex.name}: router_kind must be one of {list(ROUTER_KINDS)}")
         if dex.type == "v3" and not dex.fee_tiers:

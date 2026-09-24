@@ -109,6 +109,8 @@ def cmd_selftest(cfg, args) -> int:
     for dex in cfg.dexes.values():
         labels[f"{dex.name} factory"] = dex.factory
         labels[f"{dex.name} router"] = dex.router
+        if dex.quoter:
+            labels[f"{dex.name} quoter"] = dex.quoter
     if cfg.contract_address:
         labels["contract_address"] = cfg.contract_address
     missing = chain.missing_code(labels)
@@ -132,24 +134,27 @@ def cmd_selftest(cfg, args) -> int:
     print(f"  [{' OK ' if vault_ok else 'FAIL'}] contract vault matches config")
     ok &= owner_ok and vault_ok
 
-    native = cfg.token(cfg.native_wrapped)
-    stables = {cfg.token(s) for s in cfg.stable_tokens}
-    pool = max((p for p in chain.pools if p.active and p.has(native) and p.other(native) in stables),
-               key=lambda p: p.reserves_for(native)[0], default=None)
-    if pool is None:
-        print("  [FAIL] no active pool between the native token and a stable token")
-        return 1
+    # One deliberately losing round trip per dex, through its deepest pool that
+    # contains a flash token. Reaching the Unprofitable check proves the flash
+    # loan, that dex's swap call and the approvals all work.
     from flasharb.routes import Route
-    route = Route((pool, pool), (native, pool.other(native), native))
-    amount = min(10 ** chain.decimals[native] // 1000, chain.vault_balances.get(native, 0))
-    if native not in [cfg.token(s) for s in cfg.flash_tokens] or amount == 0:
-        print(f"  [FAIL] {cfg.native_wrapped} must be a flash_token with a vault balance for the self-test")
-        return 1
-    result = executor.simulate(route, amount, 0)
-    passed = result.error == "Unprofitable"
-    print(f"  [{' OK ' if passed else 'FAIL'}] round trip through {pool.label} reached the "
-          f"profit check (got: {result.error or 'no revert?!'})")
-    ok &= passed
+    flash = [cfg.token(s) for s in cfg.flash_tokens if cfg.token(s) in chain.decimals]
+    for dex in cfg.dexes.values():
+        candidates = [(p, t) for p in chain.pools if p.dex == dex.name and p.active
+                      for t in flash if p.has(t) and chain.vault_balances.get(t, 0) > 0]
+        if not candidates:
+            print(f"  [FAIL] {dex.name}: no active pool with a borrowable token to test")
+            ok = False
+            continue
+        pool, token = max(candidates, key=lambda c: c[0].depth()[0 if c[1] == c[0].token0 else 1])
+        route = Route((pool, pool), (token, pool.other(token), token))
+        amount = max(1, 10 ** chain.decimals[token] // 1000)  # 0.001 of the token
+        result = executor.simulate(route, amount, 0)
+        passed = result.error == "Unprofitable"
+        print(f"  [{' OK ' if passed else 'FAIL'}] {dex.name}: round trip through "
+              f"{route.describe({a: s for s, a in cfg.tokens.items()})} reached the profit check "
+              f"(got: {result.error or 'no revert?!'})")
+        ok &= passed
     print("\nSELF-TEST PASSED" if ok else "\nSELF-TEST FAILED - fix the items above before running")
     return 0 if ok else 1
 

@@ -129,14 +129,19 @@ class Chain:
     def _discover_pools(self, tokens: List[str]) -> List[Pool]:
         get_pair = self.selector("getPair(address,address)")
         get_pool = self.selector("getPool(address,address,uint24)")
+        pool_by_pair = self.selector("poolByPair(address,address)")
         calls, meta = [], []
         for dex in self.cfg.dexes.values():
             for i, a in enumerate(tokens):
                 for b in tokens[i + 1:]:
                     t0, t1 = sorted((a, b), key=lambda x: int(x, 16))
-                    if dex.type == "v2":
-                        calls.append((dex.factory, get_pair + self.encode(["address", "address"], [self.cs(t0), self.cs(t1)])))
+                    pair = self.encode(["address", "address"], [self.cs(t0), self.cs(t1)])
+                    if dex.type in ("v2", "camelot_v2"):
+                        calls.append((dex.factory, get_pair + pair))
                         meta.append((dex, t0, t1, dex.fee))
+                    elif dex.type == "algebra":  # one pool per pair, fee read each block
+                        calls.append((dex.factory, pool_by_pair + pair))
+                        meta.append((dex, t0, t1, 0))
                     else:
                         for fee in dex.fee_tiers:
                             calls.append((dex.factory, get_pool + self.encode(
@@ -151,41 +156,63 @@ class Chain:
                 continue
             pools.append(Pool(address=address, dex=dex.name, kind=dex.type, token0=t0, token1=t1,
                               fee_ppm=fee, router=dex.router, router_kind=dex.router_kind,
-                              quoter=dex.quoter if dex.type == "v3" else ""))
-        return pools
+                              quoter=dex.quoter if dex.type in ("v3", "algebra") else ""))
+        return self._drop_stable_pairs(pools)
+
+    def _drop_stable_pairs(self, pools: List[Pool]) -> List[Pool]:
+        """Camelot V2 "stable" pairs use a different curve (x^3y + y^3x), which the
+        constant-product math can't price. Keep only pairs that confirm they're volatile."""
+        camelot = [p for p in pools if p.kind == "camelot_v2"]
+        if not camelot:
+            return pools
+        results = self.call_many([(p.address, self.selector("stableSwap()")) for p in camelot])
+        drop = {p.address for p, data in zip(camelot, results)
+                if data is None or self.decode(["bool"], data)[0]}
+        if drop:
+            log.info("skipping %d Camelot stable pairs", len(drop))
+        return [p for p in pools if p.address not in drop]
 
     def refresh_pool_balances(self) -> None:
-        """Read the tokens each V3 pool actually holds (see Pool.depth)."""
-        v3 = [p for p in self.pools if p.kind == "v3"]
+        """Read the tokens each concentrated-liquidity pool actually holds (see Pool.depth)."""
+        pools = [p for p in self.pools if p.concentrated]
         balance_of = self.selector("balanceOf(address)")
         calls = []
-        for pool in v3:
+        for pool in pools:
             owner = self.encode(["address"], [self.cs(pool.address)])
             calls += [(pool.token0, balance_of + owner), (pool.token1, balance_of + owner)]
         results = self.call_many(calls)
-        for i, pool in enumerate(v3):
+        for i, pool in enumerate(pools):
             b0, b1 = results[2 * i], results[2 * i + 1]
             pool.balance0 = self.decode(["uint256"], b0)[0] if b0 else 0
             pool.balance1 = self.decode(["uint256"], b1)[0] if b1 else 0
 
+    def _quote_hop(self, pool: Pool, token_in: str, token_out: str, amount: int) -> int:
+        """eth_call the pool's quoter. Uniswap QuoterV2 and Algebra's Quoter differ."""
+        if pool.kind == "v3":
+            data = self.selector("quoteExactInputSingle((address,address,uint256,uint24,uint160))") + \
+                self.encode(["(address,address,uint256,uint24,uint160)"],
+                            [(self.cs(token_in), self.cs(token_out), int(amount), pool.fee_ppm, 0)])
+        else:
+            data = self.selector("quoteExactInputSingle(address,address,uint256,uint160)") + \
+                self.encode(["address", "address", "uint256", "uint160"],
+                            [self.cs(token_in), self.cs(token_out), int(amount), 0])
+        raw = bytes(self.w3.eth.call({"to": self.cs(pool.quoter), "data": data}))
+        return self.decode(["uint256"], raw[:32])[0]
+
     def quote_route(self, route, amount_in: int) -> Tuple[int, bool]:
-        """Exact output of a route. V2 hops use the fresh reserves; V3 hops ask the
-        dex's QuoterV2 via eth_call, which walks the real liquidity across price
-        bands. Returns (amount_out, fully_verified); 0 if a quote reverts."""
-        selector = self.selector("quoteExactInputSingle((address,address,uint256,uint24,uint160))")
+        """Exact output of a route. V2-style hops use the fresh reserves (exact);
+        concentrated-liquidity hops ask the dex's quoter via eth_call, which walks
+        the real liquidity across price bands. Returns (amount_out, fully_verified);
+        0 if a quote reverts."""
         amount, verified = amount_in, True
         for pool, token_in, token_out in route.hops():
-            if pool.kind == "v2":
+            if not pool.concentrated:
                 amount = pool.amount_out(token_in, amount)
             elif pool.quoter:
-                data = selector + self.encode(
-                    ["(address,address,uint256,uint24,uint160)"],
-                    [(self.cs(token_in), self.cs(token_out), int(amount), pool.fee_ppm, 0)])
                 try:
-                    raw = self.w3.eth.call({"to": self.cs(pool.quoter), "data": data})
+                    amount = self._quote_hop(pool, token_in, token_out, amount)
                 except Exception:  # e.g. not enough liquidity for this size
                     return 0, True
-                amount = self.decode(["uint256", "uint160", "uint32", "uint256"], bytes(raw))[0]
             else:
                 amount = pool.amount_out(token_in, amount)
                 verified = False
@@ -202,35 +229,50 @@ class Chain:
             return block
         get_reserves = self.selector("getReserves()")
         slot0 = self.selector("slot0()")
+        global_state = self.selector("globalState()")
         liquidity = self.selector("liquidity()")
         balance_of = self.selector("balanceOf(address)") + self.encode(["address"], [self.cs(self.cfg.balancer_vault)])
 
         calls = []
         for pool in self.pools:
-            if pool.kind == "v2":
+            if pool.kind in ("v2", "camelot_v2"):
                 calls.append((pool.address, get_reserves))
             else:
-                calls += [(pool.address, slot0), (pool.address, liquidity)]
+                state = slot0 if pool.kind == "v3" else global_state
+                calls += [(pool.address, state), (pool.address, liquidity)]
         flash_tokens = [self.cfg.token(s) for s in self.cfg.flash_tokens]
         calls += [(t, balance_of) for t in flash_tokens]
 
         results = iter(self.call_many(calls, block))
         for pool in self.pools:
-            if pool.kind == "v2":
+            if pool.kind in ("v2", "camelot_v2"):
                 data = next(results)
                 if data is None:
                     pool.update_v2(0, 0)
-                else:
+                elif pool.kind == "v2":
                     r0, r1, _ = self.decode(["uint112", "uint112", "uint32"], data)
                     pool.update_v2(r0, r1)
-            else:
-                s0, liq = next(results), next(results)
-                if s0 is None or liq is None:
-                    pool.update_v3(0, 0)
                 else:
+                    # Camelot: (reserve0, reserve1, token0FeePercent, token1FeePercent),
+                    # fees out of 100,000 -> parts per million.
+                    r0, r1, f0, f1 = self.decode(["uint112", "uint112", "uint16", "uint16"], data[:128])
+                    pool.update_v2(r0, r1)
+                    pool.fee_ppm, pool.fee1_ppm = f0 * 10, f1 * 10
+            else:
+                state, liq = next(results), next(results)
+                if state is None or liq is None:
+                    pool.update_v3(0, 0)
+                elif pool.kind == "v3":
                     # Only the first two slot0 fields are read; forks differ after that.
-                    sqrt_price, _ = self.decode(["uint160", "int24"], s0[:64])
+                    sqrt_price, _ = self.decode(["uint160", "int24"], state[:64])
                     pool.update_v3(sqrt_price, self.decode(["uint128"], liq)[0])
+                else:
+                    # Algebra (Camelot V3) globalState: price, tick, feeZto, feeOtz, ...
+                    # Fees are already in parts per million and differ by direction.
+                    sqrt_price, _, fee_zto, fee_otz = self.decode(
+                        ["uint160", "int24", "uint16", "uint16"], state[:128])
+                    pool.update_v3(sqrt_price, self.decode(["uint128"], liq)[0])
+                    pool.fee_ppm, pool.fee1_ppm = fee_zto, fee_otz
         for token in flash_tokens:
             data = next(results)
             self.vault_balances[token] = self.decode(["uint256"], data)[0] if data else 0

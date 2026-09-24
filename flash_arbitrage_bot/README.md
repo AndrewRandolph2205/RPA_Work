@@ -2,7 +2,7 @@
 
 An on-chain arbitrage bot for **Arbitrum**, an EVM chain with many
 decentralized exchanges and tokens. It watches every pool between your
-configured tokens on Uniswap V3, Uniswap V2 and SushiSwap. When a cycle of
+configured tokens on Uniswap V3, Uniswap V2, SushiSwap and Camelot (V2 and V3). When a cycle of
 swaps returns more than it started with, it:
 
 1. **borrows** the starting token with a **Balancer V2 flash loan** (no fee, no
@@ -157,8 +157,10 @@ reverts means others are faster; the bot halts itself after
   tokens are skipped with a warning, and a symbol that doesn't match its name
   is flagged. The summary's `slowest_block_eval` shows how long each block's
   analysis takes; keep it well under 250ms (about 40,000 routes take ~25ms).
-- **More DEXes:** any Uniswap V2 fork (factory + router) or Uniswap V3 fork
-  whose router takes `exactInputSingle`. Set `router_kind` to match the router.
+- **More DEXes:** any Uniswap V2 fork (factory + router), Uniswap V3 fork whose
+  router takes `exactInputSingle`, Camelot-style V2 pairs, or Algebra-based V3
+  pools. Set `type` and `router_kind` to match. `selftest` runs a round trip
+  through each configured DEX to prove its swap call works.
 - **Other EVM chains:** change `chain_id`, the token and DEX addresses, and the
   RPC. The Balancer vault and Multicall3 have the same address on most chains.
   For Base, for example:

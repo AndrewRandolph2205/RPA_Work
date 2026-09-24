@@ -43,6 +43,52 @@ class AmmTests(unittest.TestCase):
         self.assertFalse(p.active)
 
 
+class CamelotTests(unittest.TestCase):
+    def camelot(self, fee0, fee1):
+        p = pool("camelot", WETH, USDC, 1000 * E18, 2_050_000 * E6, fee=fee0, kind="camelot_v2")
+        p.router_kind, p.fee1_ppm = "camelot_v2", fee1
+        return p
+
+    def test_directional_fees(self):
+        p = self.camelot(3000, 1000)  # selling WETH costs 0.3%, selling USDC 0.1%
+        plain = pool("plain", WETH, USDC, 1000 * E18, 2_050_000 * E6, fee=3000)
+        self.assertEqual(p.amount_out(WETH, E18), plain.amount_out(WETH, E18))
+        self.assertGreater(p.amount_out(USDC, 2000 * E6), plain.amount_out(USDC, 2000 * E6))
+        self.assertEqual(p.label, "camelot")  # dynamic fee: no tier in the label
+
+    def test_mobius_and_prefilter_respect_directional_fees(self):
+        uni = pool("uni", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        cam = self.camelot(3000, 1000)
+        for route in find_cycles([uni, cam], [WETH, USDC], 2):
+            a, b, c = route.mobius()
+            x = E18 if route.start == WETH else 2000 * E6
+            self.assertAlmostEqual(a * x / (b + c * x) / route.amount_out(x), 1.0, places=6)
+
+    def test_bot_finds_gap_between_uniswap_and_camelot(self):
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("scan", tmp)
+        uni = pool("uni", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        bot = FlashBot(cfg, FakeChain([uni, self.camelot(3000, 1000)]), None,
+                       RiskManager(cfg.risk), Journal(tmp))
+        bot.step()
+        self.assertGreater(bot.stats.candidates, 0)
+        with open(f"{tmp}/opportunities.csv") as fh:
+            self.assertIn("[camelot]", fh.read())
+
+    def test_algebra_pools_are_concentrated(self):
+        p = pool("alg", WETH, USDC, 0, 0, kind="algebra")
+        self.assertTrue(p.concentrated)
+        self.assertFalse(pool("v2", WETH, USDC, 1, 1).concentrated)
+
+    def test_router_kinds_match_contract(self):
+        import re
+        from pathlib import Path
+        from flasharb.amm import ROUTER_KINDS
+        sol = (Path(__file__).resolve().parent.parent / "contracts" / "FlashArbitrage.sol").read_text()
+        contract = {int(v) for v in re.findall(r"uint8 internal constant KIND_\w+ = (\d+);", sol)}
+        self.assertEqual(contract, set(ROUTER_KINDS.values()))
+
+
 class DepthTests(unittest.TestCase):
     """V3 virtual reserves can claim far more depth than a pool really has."""
 
