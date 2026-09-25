@@ -108,6 +108,31 @@ class DryRunDiagnosisTests(unittest.TestCase):
         self.assertIn("excluded transfer-tax tokens", bot.summary())
 
 
+class ActivePoolDiscoveryTests(unittest.TestCase):
+    def test_reads_every_block_and_shrinks_chunks_when_the_node_objects(self):
+        from flasharb.discovery import scan_log_addresses
+        asked = []
+
+        def get_logs(lo, hi, topic):
+            asked.append((lo, hi))
+            if hi - lo + 1 > 25:
+                raise RuntimeError("eth_getLogs: query returned more than 10000 results")
+            return [{"address": f"0xPOOL{b % 3}"} for b in range(lo, hi + 1)]
+        found, covered = scan_log_addresses(get_logs, "0xtopic", 1000, 1099, chunk=100)
+        self.assertEqual(found, {"0xpool0", "0xpool1", "0xpool2"})
+        self.assertEqual(covered, 100)
+        read = sorted((lo, hi) for lo, hi in asked if hi - lo + 1 <= 25)
+        self.assertEqual(sum(hi - lo + 1 for lo, hi in read), 100)   # every block exactly once
+
+    def test_other_errors_are_raised(self):
+        from flasharb.discovery import scan_log_addresses
+
+        def get_logs(lo, hi, topic):
+            raise RuntimeError("HTTP 403 forbidden")
+        with self.assertRaises(RuntimeError):
+            scan_log_addresses(get_logs, "0xtopic", 1, 10)
+
+
 class HeadFeedTests(unittest.TestCase):
     def test_announces_the_nodes_heads(self):
         clock = FakeClock()

@@ -48,6 +48,10 @@ class DiscoveryConfig:
     min_liquidity_usd: float = 20_000.0   # real WETH/stable value paired against the token
     max_tokens: int = 150
     max_pairs_per_factory: int = 30_000   # newest pairs first
+    # Concentrated-liquidity exchanges (Uniswap V3, Algebra) keep no list of their
+    # pools, so their tokens are found from recent trading instead: every pool that
+    # emitted a Swap in the last this-many blocks (0 = off; ~1800 is an hour on Polygon).
+    active_pool_blocks: int = 0
     cache_hours: float = 24.0
     cache_file: str = "logs/discovered_tokens.json"
 
@@ -214,6 +218,8 @@ def validate(cfg: Config) -> None:
         raise ValueError("min_priority_fee_gwei can't be negative")
     if cfg.extra_tx_cost_usd < 0:
         raise ValueError("extra_tx_cost_usd can't be negative")
+    if cfg.discovery.active_pool_blocks < 0:
+        raise ValueError("[discovery] active_pool_blocks can't be negative")
     if cfg.logs_settle_ms < 0 or cfg.logs_resync_s <= 0:
         raise ValueError("logs_settle_ms can't be negative and logs_resync_s must be positive")
     if cfg.send_rpc_url and not cfg.send_rpc_url.startswith(("http://", "https://")):

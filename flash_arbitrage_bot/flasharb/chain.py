@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
 
 from . import discovery
+from .errors import describe
 from .amm import ALGEBRA, CONCENTRATED, V2_STYLE, Pool
 from .logstate import LATEST, apply_event, drifted, pool_state
 from .config import Config
@@ -179,6 +180,12 @@ class Chain:
         self._last_block = None  # pool list changed: next refresh must read everything
         log.info("found %d pools across %d dexes for %d tokens (%d discovered)",
                  len(self.pools), len(self.cfg.dexes), len(self.decimals), len(self.discovered))
+        per_dex = {name: sum(1 for p in self.pools if p.dex == name) for name in self.cfg.dexes}
+        log.info("  pools per dex: %s", ", ".join(f"{name} {n}" for name, n in per_dex.items()))
+        empty = [name for name, n in per_dex.items() if n == 0]
+        if empty:
+            log.warning("  no pools found on %s: check the factory address (and type) in the config",
+                        ", ".join(empty))
 
     # ----- long-tail token discovery ------------------------------------------
 
@@ -196,7 +203,7 @@ class Chain:
             self.refresh_pool_balances()
             stables = {self.cfg.token(s) for s in self.cfg.stable_tokens if self.cfg.token(s) in self.decimals}
             prices = usd_prices(self.pools, self.decimals, stables)
-            records = self._enumerate_v2_pairs()
+            records = self._enumerate_v2_pairs() + self._enumerate_active_pools()
             chosen = discovery.select_tokens(records, prices, self.decimals, disc.min_liquidity_usd,
                                              disc.max_tokens, exclude=set(core))
             meta = self._token_meta([t for t, _ in chosen])
@@ -244,6 +251,56 @@ class Chain:
                 records.append((self.decode(["address"], t0)[0].lower(),
                                 self.decode(["address"], t1)[0].lower(), r0, r1))
             log.info("  %s: scanned %d of %d pairs", dex.name, len(pairs), total)
+        return records
+
+    def _enumerate_active_pools(self) -> List[discovery.PairRecord]:
+        """(token0, token1, balance0, balance1) for every pool of a configured
+        concentrated-liquidity exchange that traded in the last
+        `active_pool_blocks` blocks. Their factories keep no list of pools, but
+        each pool's Swap events give it away, and each pool names its factory."""
+        blocks = self.cfg.discovery.active_pool_blocks
+        factories = {d.factory: d.name for d in self.cfg.dexes.values() if d.type in CONCENTRATED}
+        if blocks <= 0 or not factories:
+            return []
+        # Uniswap V3, its forks and Algebra all emit this same Swap event.
+        topic = "0x" + bytes(self.Web3.keccak(text="Swap(address,address,int256,int256,uint160,uint128,int24)")).hex()
+
+        def get_logs(lo, hi, topic_):
+            return self._result("eth_getLogs", [{"fromBlock": hex(lo), "toBlock": hex(hi), "topics": [topic_]}]) or []
+
+        head = self.head()
+        try:
+            pools, covered = discovery.scan_log_addresses(get_logs, topic, head - blocks + 1, head)
+        except Exception as exc:
+            log.warning("  couldn't read recent swaps for pool discovery (%s); using V2-style lists only",
+                        describe(exc))
+            return []
+        pools = sorted(pools)
+        calls = []
+        for pool in pools:
+            calls += [(pool, self.selector("factory()")), (pool, self.selector("token0()")),
+                      (pool, self.selector("token1()"))]
+        info = self.call_many(calls)
+        mine = []
+        for i, pool in enumerate(pools):
+            f, t0, t1 = info[3 * i], info[3 * i + 1], info[3 * i + 2]
+            if not (f and t0 and t1) or self.decode(["address"], f)[0].lower() not in factories:
+                continue
+            mine.append((pool, self.decode(["address"], t0)[0].lower(), self.decode(["address"], t1)[0].lower()))
+        # Value them by what they actually hold (virtual liquidity would overstate it).
+        balance_of = self.selector("balanceOf(address)")
+        calls = []
+        for pool, t0, t1 in mine:
+            owner = self.encode(["address"], [self.cs(pool)])
+            calls += [(t0, balance_of + owner), (t1, balance_of + owner)]
+        balances = self.call_many(calls)
+        records = []
+        for i, (pool, t0, t1) in enumerate(mine):
+            b0, b1 = balances[2 * i], balances[2 * i + 1]
+            if b0 and b1:
+                records.append((t0, t1, self.decode(["uint256"], b0[:32])[0], self.decode(["uint256"], b1[:32])[0]))
+        log.info("  concentrated-liquidity pools that traded in the last %d blocks: %d of %d active pools "
+                 "belong to %s", covered, len(records), len(pools), ", ".join(sorted(factories.values())))
         return records
 
     def _token_meta(self, tokens: List[str]) -> Dict[str, Tuple[int, str]]:

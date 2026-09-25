@@ -110,7 +110,8 @@ VOXEL = "0xd0258a3fD00f38aa8090dfee343f10A9D4d30D3F"
 # ---- DEXes --------------------------------------------------------------------------
 # QuickSwap V3 runs the original Algebra ("algebra_v1": one dynamic fee for both
 # directions); its router takes the same call as Camelot V3's. A DEX that finds
-# 0 pools at startup has a wrong address: check it on the explorer.
+# 0 pools at startup has a wrong address: check it on the explorer. A DEX whose
+# exact checks keep failing with "swap reverted @ <name>" has a wrong router.
 [dexes.quickswap_v3]
 type = "algebra_v1"
 factory = "0x411b0fAcC3489691f28ad58c47006AF5E3Ab3A28"
@@ -140,6 +141,38 @@ router = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
 router_kind = "v2"
 fee = 3000
 
+# Sushi V3 is a Uniswap V3 copy; its router is the original Uniswap V3 SwapRouter
+# style (with a deadline field). No quoter listed: exact checks use RouteSimulator.
+[dexes.sushiswap_v3]
+type = "v3"
+factory = "0x917933899c6a5F8E37F31E19f92CdBFF7e8FF0e2"
+router = "0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3"
+router_kind = "v3_router"
+fee_tiers = [100, 500, 3000, 10000]
+
+# Smaller Uniswap V2 copies. Their prices drift from the big exchanges' more
+# often, and fewer bots watch them. Each charges its own fixed fee.
+[dexes.apeswap]
+type = "v2"
+factory = "0xCf083Be4164828f00cAE704EC15a36D711491284"
+router = "0xC0788A3aD43d79aa53B09c2EaCc313A787d1d607"
+router_kind = "v2"
+fee = 2000                      # 0.2%
+
+[dexes.comethswap]
+type = "v2"
+factory = "0x800b052609c355cA8103E06F022aA30647eAd60a"
+router = "0x93bcDc45f7e62f89a8e901DC4A0E2c6C427D9F25"
+router_kind = "v2"
+fee = 5000                      # 0.5%
+
+[dexes.dfyn]
+type = "v2"
+factory = "0xE7Fb3e833eFE5F9c441105EB65Ef8b261266423B"
+router = "0xA102072A4C07F06EC3B4900FDC4C7B80b6c57429"
+router_kind = "v2"
+fee = 3000
+
 [risk]
 min_profit_usd = 0.10           # paper trading showed gaps under $0.10 lose money overall (lost bids)
 max_loan_usd = 25000.0
@@ -154,5 +187,6 @@ enabled = true
 min_liquidity_usd = 10000.0
 max_tokens = 250
 max_pairs_per_factory = 150000   # all of QuickSwap V2's ~136k pairs: established tokens sit in the older ones
+active_pool_blocks = 1800       # also find tokens from the V3 pools that traded in the last ~hour
 cache_hours = 24
 cache_file = "logs_polygon/discovered_tokens.json"

@@ -32,6 +32,36 @@ def select_tokens(records: Iterable[PairRecord], prices: Mapping[str, float],
     return [(t, best[t]) for t in chosen[:max_tokens]]
 
 
+# Errors a node gives when one eth_getLogs asks for too much: ask for fewer blocks.
+_TOO_MANY = ("more than", "too many", "exceed", "limit", "range", "size", "timeout", "10000")
+
+
+def scan_log_addresses(get_logs, topic: str, first: int, last: int, chunk: int = 100,
+                       min_chunk: int = 2) -> Tuple[Set[str], int]:
+    """Addresses that emitted `topic` in blocks first..last, read in chunks that
+    shrink whenever the node says a request asked for too much. Returns
+    (addresses, blocks actually covered): a later failure keeps what was read."""
+    found: Set[str] = set()
+    lo, throttled = first, 0
+    while lo <= last:
+        hi = min(last, lo + chunk - 1)
+        try:
+            entries = get_logs(lo, hi, topic)
+        except Exception as exc:
+            text = str(exc).lower()
+            if ("429" in text or "rate" in text) and throttled < 5:  # rate limited: slow down, same chunk
+                throttled += 1
+                time.sleep(throttled)
+                continue
+            if chunk > min_chunk and any(m in text for m in _TOO_MANY):
+                chunk = max(min_chunk, chunk // 2)
+                continue
+            raise
+        found.update(e["address"].lower() for e in entries if e.get("address"))
+        lo = hi + 1
+    return found, last - first + 1
+
+
 def unique_name(symbol: str, address: str, taken: Set[str]) -> str:
     """Config-style token name; disambiguated with the address when symbols clash."""
     clean = "".join(ch for ch in symbol if ch.isprintable() and not ch.isspace())[:20] or "TOKEN"
