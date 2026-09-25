@@ -858,7 +858,7 @@ class FlashBot:
         prev, self._state_prev = self._state_prev, now
         d = {k: v - prev.get(k, 0) for k, v in now.items()}
         text = (f"state: {d['logs']} blocks from pool events, {d['rpc']} RPC reads ({d['resyncs']} resyncs, "
-                f"{d['timeouts']} event timeouts)")
+                f"{d['timeouts']} event timeouts, {d.get('late_events', 0)} late events)")
         if not chain.logs.ready():
             text += ", event stream DOWN"
         if chain.last_drift is not None:

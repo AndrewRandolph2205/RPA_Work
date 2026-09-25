@@ -224,7 +224,8 @@ class FakeRpcChain(Chain):
         self._last_block, self.logs = None, None
         self._logs_generation, self._logs_synced_at = -1, float("-inf")
         self._marks, self.last_drift = {}, None
-        self.state_stats = {k: 0 for k in ("logs", "rpc", "resyncs", "timeouts", "stale_events", "unapplied")}
+        self.state_stats = {k: 0 for k in ("logs", "rpc", "resyncs", "timeouts", "stale_events", "unapplied",
+                                           "late_events")}
         self.rpc_state, self.rpc_reads = {}, []
         self.attach_logs(stream)
 
@@ -277,6 +278,19 @@ class ChainLogsTests(unittest.TestCase):
         self.stream.handle_message(head(12))
         self.chain.refresh(block=11, wait_s=0)
         self.assertEqual((self.p.reserve0, self.p.reserve1), (5, 6))
+
+    def test_events_after_their_block_was_priced_count_as_late(self):
+        self.stream.handle_message(head(10))
+        self.chain.refresh(block=10, wait_s=0)
+        self.sync(11, 0, 5, 6)
+        self.stream.handle_message(head(12))
+        self.chain.refresh(block=11, wait_s=0)
+        self.sync(11, 1, 7, 8)  # block 11 was already priced
+        self.sync(12, 0, 9, 9)
+        self.stream.handle_message(head(13))
+        self.chain.refresh(block=12, wait_s=0)
+        self.assertEqual(self.chain.state_stats["late_events"], 1)
+        self.assertEqual((self.p.reserve0, self.p.reserve1), (9, 9))
 
     def test_not_ready_falls_back_to_rpc(self):
         self.stream.handle_message(head(10))

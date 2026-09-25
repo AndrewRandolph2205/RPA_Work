@@ -97,7 +97,7 @@ class Chain:
         self._logs_synced_at = float("-inf")
         self._marks: Dict[str, Tuple[int, int]] = {}  # pool -> (block, log index) its state reflects
         self.state_stats = {"logs": 0, "rpc": 0, "resyncs": 0, "timeouts": 0, "stale_events": 0,
-                            "unapplied": 0}
+                            "unapplied": 0, "late_events": 0}
         self.last_drift: Optional[Tuple[int, int]] = None  # (pools that differed, pools compared)
 
     # ----- helpers ----------------------------------------------------------
@@ -494,8 +494,12 @@ class Chain:
                 changed = drifted(before, self._tracked_pools().values())
                 self.last_drift = (len(changed), len(before))
                 if changed:
-                    log.info("pool events drifted from the RPC on %d of %d pools (e.g. %s); resynced",
-                             len(changed), len(before), ", ".join(changed[:3]))
+                    names = {addr: sym for sym, addr in self.cfg.tokens.items()}
+                    log.info("pool events drifted from the RPC on %d of %d pools: %s; resynced (late events "
+                             "so far: %d)", len(changed), len(before), "; ".join(
+                                 f"{p.address} {p.label} {names.get(p.token0, p.token0[:8])}/"
+                                 f"{names.get(p.token1, p.token1[:8])} ({what})" for p, what in changed[:5]),
+                             self.state_stats["late_events"])
             self._logs_generation = generation
             self._logs_synced_at = time.monotonic()
             self.state_stats["resyncs"] += 1
@@ -522,6 +526,9 @@ class Chain:
             if event.position <= self._marks.get(event.pool, (-1, -1)):
                 self.state_stats["stale_events"] += 1  # already part of an RPC read
                 continue
+            if self._last_block is not None and event.block <= self._last_block:
+                # This block was already priced without it: logs_settle_ms is too short.
+                self.state_stats["late_events"] += 1
             if not apply_event(pool, event):
                 self.state_stats["unapplied"] += 1
                 self.logs.invalidate()  # can't follow this pool: re-read everything next block

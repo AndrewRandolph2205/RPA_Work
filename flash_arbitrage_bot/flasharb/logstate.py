@@ -411,6 +411,18 @@ def pool_state(pool) -> tuple:
     return (pool.reserve0, pool.reserve1, pool.fee_ppm, pool.fee1_ppm)
 
 
-def drifted(before: Dict[str, tuple], pools: Sequence) -> List[str]:
-    return [p.address for p in pools if p.address in before and before[p.address] != pool_state(p)]
+def drifted(before: Dict[str, tuple], pools: Sequence) -> List[Tuple[object, str]]:
+    """[(pool, what differed)] for pools whose state no longer matches `before`."""
+    out = []
+    for p in pools:
+        old = before.get(p.address)
+        if old is None or old == pool_state(p):
+            continue
+        what = []
+        if old[:2] != pool_state(p)[:2]:
+            what.append("price/liquidity")
+        if old[2:] != pool_state(p)[2:]:
+            what.append("fee")
+        out.append((p, "+".join(what)))
+    return out
 
