@@ -35,12 +35,15 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .amm import V2_STYLE
 from .errors import describe, mask_secrets
+from .feed import FeedStats
 
 log = logging.getLogger(__name__)
 
 EVENT_SIGNATURES = {
     "sync": "Sync(uint112,uint112)",
+    "sync_solidly": "Sync(uint256,uint256)",                      # Solidly / Aerodrome volatile pools
     # Uniswap V3 and Algebra share these three signatures (same types, other names).
     "swap": "Swap(address,address,int256,int256,uint160,uint128,int24)",
     "mint": "Mint(address,address,int24,int24,uint128,uint256,uint256)",
@@ -51,6 +54,7 @@ EVENT_SIGNATURES = {
 # Known values, checked against keccak at startup (see event_topics).
 KNOWN_TOPICS = {
     "sync": "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1",
+    "sync_solidly": "0xcf2aa50876cdfbb541206f89af0ee78d44a2abf8d328e37fa4917f982149848a",
     "swap": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
     "mint": "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
     "burn": "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c",
@@ -112,7 +116,7 @@ def decode_log(entry: dict, topics: Dict[str, str]) -> Optional[Event]:
         if kind is None:
             return None
         words = _words(entry.get("data") or "0x")
-        if kind == "sync":
+        if kind in ("sync", "sync_solidly"):
             values = (_uint(words[0]), _uint(words[1]))
         elif kind == "swap":  # amount0, amount1, sqrtPriceX96, liquidity, tick
             values = (_int(words[0]), _int(words[1]), _uint(words[2]), _uint(words[3]), _int(words[4]))
@@ -134,8 +138,8 @@ def apply_event(pool, event: Event) -> bool:
     """Update `pool` in place. Returns False when the event can't be applied
     (then the pool needs an RPC read)."""
     kind, v = event.kind, event.values
-    if kind == "sync":
-        if pool.kind not in ("v2", "camelot_v2"):
+    if kind in ("sync", "sync_solidly"):
+        if pool.kind not in V2_STYLE:
             return True
         pool.update_v2(v[0], v[1])
     elif kind == "camelot_fee":
@@ -395,6 +399,61 @@ class LogStream:
                 backoff = min(backoff * 2, 30.0)
                 continue
             self._disconnected()
+
+
+class HeadFeed:
+    """Block announcements from the node's own newHeads, for chains with no
+    sequencer feed (Base, Optimism, ...). Offers the parts of SequencerFeed the
+    bot uses. Its block numbers are the node's own, so they need no check."""
+
+    trusted = True
+
+    def __init__(self, stream: LogStream, stale_after_s: float = 10.0):
+        self.stream = stream
+        self.stale_after_s = stale_after_s
+        self.stats = FeedStats()   # no express lane to count on these chains
+        self.total = FeedStats()
+
+    def healthy(self) -> bool:
+        s = self.stream
+        with s._cond:
+            if not s.subscribed or not s._head_at:
+                return False
+            last = next(reversed(s._head_at.values()))
+        return s._clock() - last < self.stale_after_s
+
+    def latest_block(self) -> Optional[int]:
+        with self.stream._cond:
+            return self.stream._head
+
+    def wait_for_block_after(self, block: Optional[int], timeout: float) -> Optional[int]:
+        s = self.stream
+        deadline = s._clock() + timeout
+        with s._cond:
+            while True:
+                if s._head is not None and (block is None or s._head > block):
+                    return s._head
+                remaining = deadline - s._clock()
+                if remaining <= 0:
+                    return None
+                s._cond.wait(remaining)
+
+    def arrival(self, block: int) -> Optional[float]:
+        with self.stream._cond:
+            return self.stream._head_at.get(block)
+
+    def age_ms(self, block: int) -> Optional[float]:
+        arrived = self.arrival(block)
+        return None if arrived is None else (self.stream._clock() - arrived) * 1000
+
+    def express_lane_state(self, window: int = 0) -> Optional[bool]:
+        return False  # no Timeboost outside Arbitrum
+
+    def recent_hashes(self):
+        return []
+
+    def stop(self) -> None:
+        pass
 
 
 def ws_url_from_http(url: str) -> str:

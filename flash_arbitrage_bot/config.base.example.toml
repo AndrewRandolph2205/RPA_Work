@@ -1,0 +1,136 @@
+# Base (Coinbase's OP-stack chain). Copy to config.base.toml and run with:
+#   python run_flash.py run --config config.base.toml
+#
+# How Base differs from Arbitrum, and what that means here:
+# - Blocks every 2s, not 0.25s.
+# - Inside a block the sequencer orders transactions by priority fee, not by
+#   arrival, so a trade is won by bidding, not by milliseconds (ordering = "fee").
+#   Base also streams each block in 200ms "flashblocks": a competitor that arrives
+#   a whole flashblock earlier can still land first whatever the fees, so paper
+#   results on Base are an upper bound. The closers' positions and priority fees
+#   (logs/closers.csv, paper_trades.csv) show what really decides the race.
+# - Every transaction also pays a small L1 data fee (extra_tx_cost_usd).
+# - No Arbitrum-style sequencer feed: blocks are announced by the node's own
+#   newHeads over the same websocket that streams the pool events.
+#
+# Start in scan mode for a day: it's free, and the gap lifetimes and closers it
+# records say whether Base is less crowded than Arbitrum before anything else.
+# Needs RPC_URL for Base, e.g. https://base-mainnet.g.alchemy.com/v2/<key>
+# (enable Base for the key in Alchemy's dashboard).
+mode = "scan"
+
+# ---- Network: Base ------------------------------------------------------------
+# Addresses from memory: `python run_flash.py selftest --config config.base.toml`
+# checks every factory and router holds a contract, and startup skips any token
+# that doesn't answer. Double-check on https://basescan.org before going live.
+chain_name = "base"
+chain_id = 8453
+rpc_url_env = "RPC_URL"
+balancer_vault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"   # Balancer V2, same address as on Arbitrum
+contract_address = ""
+owner_address = ""
+
+# ---- Bot behaviour ----------------------------------------------------------------
+max_hops = 3
+poll_interval_s = 0.25
+max_candidates_per_block = 3
+sim_cooldown_blocks = 5         # blocks are 8x longer than Arbitrum's
+gas_units_estimate = 450000
+route_rebuild_s = 3600
+summary_interval_s = 60
+log_dir = "logs_base"           # kept apart from Arbitrum's results
+
+# ---- Speed and ordering -------------------------------------------------------------
+sequencer_feed_url = ""         # none on Base
+state_source = "logs"           # pool events + newHeads over one websocket
+ws_rpc_url_env = "WS_RPC_URL"   # unset = RPC_URL with https:// -> wss://
+logs_settle_ms = 20
+logs_resync_s = 60
+exact_sim = true
+trace_closers = true
+ordering = "fee"                # highest priority fee first within a block
+priority_fee_share = 0.5        # bid half of each trade's expected profit above min_profit_usd
+extra_tx_cost_usd = 0.005       # L1 data fee per transaction (a few tenths of a cent)
+send_rpc_url = ""               # e.g. https://mainnet-sequencer.base.org to skip a hop (live mode)
+presimulate_live = false
+live_gas_limit = 2000000
+paper_send_latency_ms = 30
+paper_timeboost = "off"         # Timeboost is Arbitrum-only
+paper_timeboost_delay_ms = 0
+paper_block_time_ms = 2000
+paper_same_block_wins = false   # with ordering = "fee" the bids decide instead
+paper_gas_units = 0
+
+# ---- Tokens -----------------------------------------------------------------------
+native_wrapped = "WETH"
+stable_tokens = ["USDC", "USDbC", "DAI"]
+flash_tokens = ["WETH", "USDC"]
+
+[tokens]
+WETH = "0x4200000000000000000000000000000000000006"
+USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+USDbC = "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"
+DAI = "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"
+USDT = "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"
+EURC = "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42"
+# Bitcoin and staked ETH (priced close to BTC / ETH: small gaps between them are common)
+cbBTC = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+cbETH = "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"
+wstETH = "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452"
+rETH = "0xB6fe221Fe9EeF5aBa221c348bA20A1Bf5e73624c"
+weETH = "0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A"
+# Base ecosystem
+AERO = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+VIRTUAL = "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b"
+DEGEN = "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed"
+BRETT = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+TOSHI = "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4"
+
+# ---- DEXes --------------------------------------------------------------------------
+# "solidly" = Aerodrome's classic pools (Velodrome V2 code): only volatile pools are
+# used; their fee is read from the factory. Aerodrome's concentrated "Slipstream"
+# pools and PancakeSwap V3 use other interfaces and aren't supported yet.
+[dexes.uniswap_v3]
+type = "v3"
+factory = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+router = "0x2626664c2603336E57B271c5C0b26F421741e481"
+router_kind = "v3_router02"
+fee_tiers = [100, 500, 3000, 10000]
+quoter = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
+
+[dexes.uniswap_v2]
+type = "v2"
+factory = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
+router = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
+router_kind = "v2"
+fee = 3000
+
+[dexes.sushiswap]
+type = "v2"
+factory = "0x71524B4f93c58fcbF659783284E38825f0622859"
+router = "0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891"
+router_kind = "v2"
+fee = 3000
+
+[dexes.aerodrome]
+type = "solidly"
+factory = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
+router = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
+router_kind = "solidly"
+
+[risk]
+min_profit_usd = 0.10
+max_loan_usd = 25000.0
+min_pool_liquidity_usd = 10000.0
+min_pool_reserve_usd = 2500.0
+max_gas_price_gwei = 0.5        # Base gas is usually ~0.01 gwei
+max_daily_gas_usd = 5.0
+max_consecutive_reverts = 3
+
+[discovery]
+enabled = true
+min_liquidity_usd = 10000.0
+max_tokens = 250
+max_pairs_per_factory = 30000
+cache_hours = 24
+cache_file = "logs_base/discovered_tokens.json"

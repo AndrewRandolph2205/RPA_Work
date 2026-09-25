@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Mapping, Optional, Set
 
-from .amm import ROUTER_KINDS
+from .amm import ROUTER_KINDS, V2_STYLE
 
 SIM_ADDRESS = "0xaB08D2CAAD0862E8699C93C90DDA71dABAc60cc8"  # keccak("flasharb.RouteSimulator")[12:]
 CALLER = "0x52816c0a4bBD59865D9Fed0557145126BBac6AF0"       # keccak("flasharb.RouteSimulator.caller")[12:]
@@ -36,7 +36,7 @@ _ERROR_STRING = "08c379a0"  # Error(string)
 _PANIC = "4e487b71"         # Panic(uint256)
 _CUSTOM_ERRORS = {"c4c321d1": "BadRoute", "14d4a4e8": "OnlySelf", "fecb69b4": "TokenCallFailed"}
 
-V2_KINDS = ("v2", "camelot_v2")
+V2_KINDS = V2_STYLE
 
 # Revert reasons that mean "the pool didn't receive what the router sent",
 # i.e. the input token took a cut in transfer (Uniswap V2 "K", V3 "IIA", ...).

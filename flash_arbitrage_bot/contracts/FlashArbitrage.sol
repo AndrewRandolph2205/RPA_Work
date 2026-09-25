@@ -82,6 +82,25 @@ interface ICamelotRouter {
     ) external;
 }
 
+/// Solidly / Velodrome V2 router (Aerodrome on Base). factory = address(0) means the
+/// router's default factory; only volatile (stable = false) pools are used.
+interface ISolidlyRouter {
+    struct Route {
+        address from;
+        address to;
+        bool stable;
+        address factory;
+    }
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        Route[] calldata routes,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
+
 /// Algebra swap router (Camelot V3): no fee field, one pool per pair.
 interface IAlgebraSwapRouter {
     struct ExactInputSingleParams {
@@ -99,7 +118,7 @@ interface IAlgebraSwapRouter {
 
 contract FlashArbitrage {
     struct Step {
-        uint8 kind; // 0 = Uniswap V2, 1 = V3 SwapRouter02, 2 = V3 SwapRouter, 3 = Camelot V2, 4 = Algebra
+        uint8 kind; // 0 = Uniswap V2, 1 = V3 SwapRouter02, 2 = V3 SwapRouter, 3 = Camelot V2, 4 = Algebra, 5 = Solidly
         address router;
         address tokenIn;
         address tokenOut;
@@ -111,6 +130,7 @@ contract FlashArbitrage {
     uint8 internal constant KIND_V3_ROUTER = 2;
     uint8 internal constant KIND_CAMELOT_V2 = 3;
     uint8 internal constant KIND_ALGEBRA = 4;
+    uint8 internal constant KIND_SOLIDLY = 5;
 
     address public immutable owner;
     IBalancerVault public immutable vault;
@@ -251,6 +271,10 @@ contract FlashArbitrage {
                     limitSqrtPrice: 0
                 })
             );
+        } else if (s.kind == KIND_SOLIDLY) {
+            ISolidlyRouter.Route[] memory routes = new ISolidlyRouter.Route[](1);
+            routes[0] = ISolidlyRouter.Route({from: s.tokenIn, to: s.tokenOut, stable: false, factory: address(0)});
+            ISolidlyRouter(s.router).swapExactTokensForTokens(amountIn, 0, routes, address(this), block.timestamp);
         } else {
             revert BadRoute();
         }

@@ -214,8 +214,9 @@ class FakeExecutor:
             return SimResult(False, 0, "Unprofitable")
         return SimResult(True, 400_000)
 
-    def submit(self, route, amount, min_profit):
+    def submit(self, route, amount, min_profit, priority_fee_wei=0):
         self.sent.append(amount)
+        self.tips = getattr(self, "tips", []) + [priority_fee_wei]
         tx_hash = f"0x{len(self.sent):064x}"
         gas = 400_000 * 10 ** 7
         self._done.append(SendResult(True, tx_hash, route.amount_out(amount) - amount, gas, "", 1, False)

@@ -81,6 +81,7 @@ class PaperOrder:
     gas_units: int
     gas_price_wei: int
     chain_head: Optional[int] = None  # the RPC's latest block at the decision (None: couldn't read it)
+    tip_wei: int = 0                  # priority fee bid per gas (chains that order by fee)
 
     @property
     def blocks_late(self) -> int:
@@ -169,7 +170,7 @@ class PaperTrader:
               decision_ms: Optional[float], latency_source: str, prices: Dict[str, float],
               est_profit_usd: float, est_fee_usd: float, est_gas_usd: float,
               timeboost_ms: Optional[float] = None, express_lane: str = "unknown",
-              chain_head: Optional[int] = None) -> PaperOrder:
+              chain_head: Optional[int] = None, tip_wei: int = 0) -> PaperOrder:
         self._next_id += 1
         send = self.cfg.paper_send_latency_ms
         hold = self.cfg.paper_timeboost_delay_ms if timeboost_ms is None else timeboost_ms
@@ -186,7 +187,8 @@ class PaperTrader:
             landing_block=landing,
             prices=dict(prices), est_profit_usd=est_profit_usd, est_fee_usd=est_fee_usd, est_gas_usd=est_gas_usd,
             gas_units=int(self.cfg.paper_gas_units or self.cfg.gas_units_estimate),
-            gas_price_wei=int(getattr(self.chain, "last_gas_price_wei", 0) or 0), chain_head=chain_head)
+            gas_price_wei=int(getattr(self.chain, "last_gas_price_wei", 0) or 0), chain_head=chain_head,
+            tip_wei=int(tip_wei))
         self._waiting.append(order)
         self._open.add(order.paper_id)
         return order
@@ -251,6 +253,8 @@ class PaperTrader:
             log.debug("paper: couldn't look up who took the gap: %s", describe(exc))
             return
         fill.winner = winner
+        # Arbitrum blocks start with ArbOS's own transaction; OP-stack blocks with
+        # the L1-attributes deposit. Either way index 0 isn't a user transaction.
         fill.winner_block_txs = None if total is None else max(1, total - 1)
         of = f" of {fill.winner_block_txs}" if fill.winner_block_txs else ""
         fill.reason += (f"; taken by {winner['tx_hash']} ({winner['kind']}, to {winner['to'] or '?'}"
@@ -271,7 +275,8 @@ class PaperTrader:
         def profit(outcome) -> Optional[float]:
             return self._usd(order, outcome.profit_raw) if outcome.ok else None
 
-        gas_usd = order.gas_units * order.gas_price_wei / 1e18 * order.prices.get(self.native, 0.0)
+        gas_usd = (order.gas_units * (order.gas_price_wei + order.tip_wei) / 1e18 * order.prices.get(self.native, 0.0)
+                   + self.cfg.extra_tx_cost_usd)
         fill = PaperFill(order, REVERTED, "", "", method=before.method, amount_out=before.out, gas_usd=gas_usd,
                          detect_profit_usd=profit(spotted), landing_profit_usd=profit(before),
                          open_after_landing=pays(after),
@@ -286,6 +291,23 @@ class PaperTrader:
             if not pays(after):
                 fill.reason += ("; another transaction in the same block also took it, counted as won "
                                 "(paper_same_block_wins)")
+        elif pays(before) and self.cfg.ordering == "fee":
+            # The sequencer puts higher priority fees first: compare bids with whoever took it.
+            self._find_winner(fill, land, land)
+            theirs = fill.winner.get("tip_wei") if fill.winner else None
+            ours = f"{order.tip_wei / 1e9:.6g} gwei"
+            if theirs is not None and order.tip_wei > theirs:
+                fill.status, fill.cause = FILLED, "filled"
+                fill.profit_raw = before.profit_raw
+                fill.profit_usd = self._usd(order, before.profit_raw)
+                fill.flash_fee_usd = self._usd(order, before.flash_fee)
+                fill.reason = (f"outbid the transaction that took it in block {land} (our priority fee {ours} vs "
+                               f"its {theirs / 1e9:.6g}): paid ${fill.profit_usd:.4f}") + fill.reason
+            else:
+                fill.status, fill.cause = LOST, "outbid in landing block"
+                bid = "its bid is unknown" if theirs is None else f"it bid {theirs / 1e9:.6g} gwei"
+                fill.reason = (f"still paid ${fill.landing_profit_usd:.4f} going into block {land} but another "
+                               f"transaction took it: our priority fee {ours}, {bid}") + fill.reason
         elif pays(before):
             fill.status, fill.cause = LOST, "lost in landing block"
             fill.reason = (f"still paid ${fill.landing_profit_usd:.4f} going into block {land} but was gone by "
@@ -306,7 +328,7 @@ class PaperTrader:
                             else f"a revert ({spotted.reason})")
             fill.reason = (f"never paid: the exact check at block {spot} gave {spotted_text} against a floor "
                            f"of ${floor_usd:.4f}; the fast estimate was off")
-        if fill.status == LOST:
+        if fill.status == LOST and fill.winner is None and self.cfg.ordering != "fee":
             self._find_winner(fill, land, land)
         elif fill.cause == "closed before landing" and land - 1 > spot:
             self._find_winner(fill, spot + 1, land - 1)

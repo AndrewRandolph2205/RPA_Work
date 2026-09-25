@@ -295,8 +295,8 @@ class PaperModeTests(unittest.TestCase):
         bot.step()
         row = self.rows()[0]
         self.assertEqual(list(row), Journal.PAPER_FIELDS)
-        blank = [k for k, v in row.items() if v == "" and not k.startswith("winner_")]
-        self.assertEqual(blank, [])   # a filled trade has every column (no winner: it won)
+        blank = [k for k, v in row.items() if v == "" and not k.startswith("winner_") and k != "our_tip_gwei"]
+        self.assertEqual(blank, [])   # a filled trade has every column (no winner: it won; no bid on Arbitrum)
 
     def test_a_bot_behind_the_chain_lands_after_the_chains_head(self):
         # The feed timing says the block just appeared, but the RPC is already 10

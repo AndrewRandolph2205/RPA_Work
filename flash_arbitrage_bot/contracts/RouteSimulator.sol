@@ -77,6 +77,24 @@ interface ICamelotRouter {
     ) external;
 }
 
+/// Solidly / Velodrome V2 router (Aerodrome); volatile pools, default factory.
+interface ISolidlyRouter {
+    struct Route {
+        address from;
+        address to;
+        bool stable;
+        address factory;
+    }
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        Route[] calldata routes,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
+
 interface IAlgebraSwapRouter {
     struct ExactInputSingleParams {
         address tokenIn;
@@ -106,6 +124,7 @@ contract RouteSimulator {
     uint8 internal constant KIND_V3_ROUTER = 2;
     uint8 internal constant KIND_CAMELOT_V2 = 3;
     uint8 internal constant KIND_ALGEBRA = 4;
+    uint8 internal constant KIND_SOLIDLY = 5;
 
     error SimResult(uint256 flashFee, uint256[] received, uint256[] reported);
     error HopFailed(uint256 hop, bytes reason);
@@ -207,6 +226,13 @@ contract RouteSimulator {
                     limitSqrtPrice: 0
                 })
             );
+        } else if (s.kind == KIND_SOLIDLY) {
+            ISolidlyRouter.Route[] memory routes = new ISolidlyRouter.Route[](1);
+            routes[0] = ISolidlyRouter.Route({from: s.tokenIn, to: s.tokenOut, stable: false, factory: address(0)});
+            uint256[] memory amounts = ISolidlyRouter(s.router).swapExactTokensForTokens(
+                amountIn, 0, routes, address(this), block.timestamp
+            );
+            return amounts[amounts.length - 1];
         }
         revert BadRoute();
     }

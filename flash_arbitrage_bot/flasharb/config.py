@@ -13,6 +13,7 @@ from .amm import POOL_TYPES, ROUTER_KINDS
 MODES = ("scan", "paper", "simulate", "live")
 PAPER_TIMEBOOST = ("auto", "on", "off")
 STATE_SOURCES = ("rpc", "logs")
+ORDERINGS = ("arrival", "fee")
 _ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -70,6 +71,16 @@ class Config:
     max_candidates_per_block: int = 3
     sim_cooldown_blocks: int = 20
     gas_units_estimate: int = 450_000
+    # How the chain's sequencer orders transactions inside a block: "arrival"
+    # (Arbitrum: first come, first served, so speed wins) or "fee" (Base, Optimism
+    # and other OP-stack chains: highest priority fee first, so the bid wins).
+    ordering: str = "arrival"
+    # "fee" chains: offer this share of each trade's expected profit above
+    # min_profit_usd as priority fee (0 = no bid; 1 = give it all away).
+    priority_fee_share: float = 0.5
+    # A fixed cost per transaction on top of L2 gas, e.g. the L1 data fee every
+    # OP-stack transaction pays (a few tenths of a cent on Base).
+    extra_tx_cost_usd: float = 0.0
     route_rebuild_s: float = 3600.0
     summary_interval_s: float = 60.0
     log_dir: str = "logs"
@@ -192,6 +203,12 @@ def validate(cfg: Config) -> None:
         raise ValueError("sequencer_feed_url must start with ws:// or wss://")
     if cfg.state_source not in STATE_SOURCES:
         raise ValueError(f"state_source must be one of {STATE_SOURCES}, got {cfg.state_source!r}")
+    if cfg.ordering not in ORDERINGS:
+        raise ValueError(f"ordering must be one of {ORDERINGS}, got {cfg.ordering!r}")
+    if not 0 <= cfg.priority_fee_share <= 1:
+        raise ValueError("priority_fee_share must be between 0 and 1")
+    if cfg.extra_tx_cost_usd < 0:
+        raise ValueError("extra_tx_cost_usd can't be negative")
     if cfg.logs_settle_ms < 0 or cfg.logs_resync_s <= 0:
         raise ValueError("logs_settle_ms can't be negative and logs_resync_s must be positive")
     if cfg.send_rpc_url and not cfg.send_rpc_url.startswith(("http://", "https://")):

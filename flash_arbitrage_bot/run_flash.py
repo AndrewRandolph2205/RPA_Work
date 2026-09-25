@@ -359,18 +359,17 @@ def cmd_run(cfg, args) -> int:
         feed.start()
     logs = None
     if cfg.state_source == "logs":
-        if feed is None:
-            print('state_source = "logs" needs sequencer_feed_url (blocks come from the feed); '
-                  "reading pools over RPC instead.")
-        else:
-            from flasharb.logstate import LogStream, event_topics, ws_url_from_http
-            ws_url = os.environ.get(cfg.ws_rpc_url_env, "").strip() or ws_url_from_http(need_env(cfg.rpc_url_env))
-            logs = LogStream(ws_url, event_topics(lambda sig: chain.Web3.keccak(text=sig)),
-                             settle_ms=cfg.logs_settle_ms)
-            logs.start()
-            chain.attach_logs(logs)
-            print(f"Pool state: following pool events over a websocket; full re-read every "
-                  f"{cfg.logs_resync_s:.0f}s to check for drift.")
+        from flasharb.logstate import HeadFeed, LogStream, event_topics, ws_url_from_http
+        ws_url = os.environ.get(cfg.ws_rpc_url_env, "").strip() or ws_url_from_http(need_env(cfg.rpc_url_env))
+        logs = LogStream(ws_url, event_topics(lambda sig: chain.Web3.keccak(text=sig)),
+                         settle_ms=cfg.logs_settle_ms)
+        logs.start()
+        chain.attach_logs(logs)
+        source = "the sequencer feed"
+        if feed is None:  # no sequencer feed on this chain: the node's own new-block notices announce blocks
+            feed, source = HeadFeed(logs), "the node's newHeads"
+        print(f"Pool state: following pool events over a websocket, blocks announced by {source}; full "
+              f"re-read every {cfg.logs_resync_s:.0f}s to check for drift.")
     paper = None
     if cfg.mode == "paper":
         from flasharb.paper import PaperTrader
@@ -379,7 +378,9 @@ def cmd_run(cfg, args) -> int:
                         "shows the express lane in use",
                 "on": f"plus Timeboost's {cfg.paper_timeboost_delay_ms:.0f}ms hold (always)",
                 "off": "no Timeboost hold"}[cfg.paper_timeboost]
-        print(f"Paper trading: trades land {cfg.paper_send_latency_ms:.0f}ms (send) after each decision, {hold}; "
+        bid = (f"; bidding {cfg.priority_fee_share:.0%} of the expected profit above min_profit_usd as priority "
+               "fee (this chain orders by fee)" if cfg.ordering == "fee" else "")
+        print(f"Paper trading: trades land {cfg.paper_send_latency_ms:.0f}ms (send) after each decision, {hold}{bid}; "
               f"results go to {Path(cfg.log_dir) / 'paper_trades.csv'}. Nothing is sent.")
     tracer = None
     if cfg.mode == "scan" and cfg.trace_closers:

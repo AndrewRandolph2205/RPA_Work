@@ -368,22 +368,76 @@ reverts means others are faster; the bot halts itself after
   router takes `exactInputSingle`, Camelot-style V2 pairs, or Algebra-based V3
   pools. Set `type` and `router_kind` to match. `selftest` runs a round trip
   through each configured DEX to prove its swap call works.
-- **Other EVM chains:** change `chain_id`, the token and DEX addresses, and the
-  RPC. The Balancer vault and Multicall3 have the same address on most chains.
-  For Base, for example:
-  ```toml
-  chain_name = "base"
-  chain_id = 8453
-  # WETH = 0x4200000000000000000000000000000000000006
-  # USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-  # Uniswap V3 factory 0x33128a8fC17869897dcE68Ed026d694621f6FDfD, SwapRouter02 0x2626664c2603336E57B271c5C0b26F421741e481
-  ```
-  Verify every address on the chain's block explorer; `selftest` catches
-  addresses with no contract. Avoid Ethereum mainnet: gas is far higher, and its
-  public mempool lets other bots copy or sandwich your transactions.
+- **Other EVM chains:** see [Other chains](#other-chains-base-and-beyond) below.
 Only if simulate mode shows meaningful profit over several days: set
 `mode = "live"` and run `python3 run_flash.py run --live`. Both are required.
 Watch `logs/trades.csv` and the `succeeded` / `reverted` counts.
+
+## Other chains (Base and beyond)
+
+On Arbitrum, paper mode showed who takes the gaps: in 13 of 14 lost races
+the winner was the **first or second transaction** of the next block, ahead
+of 15–37 others. Those bots react within a few milliseconds; a bot ~90ms
+behind (this one on a server near the sequencer) never gets there first.
+Other chains decide the race differently, so the bot now runs on them too.
+
+**Base** (`config.base.example.toml`):
+
+- **Ordering by fee, not arrival.** Base's sequencer puts the highest priority
+  fee first within a block (`ordering = "fee"`), so trades are won by bidding.
+  The bot bids `priority_fee_share` of each trade's expected profit above
+  `min_profit_usd`. Paper mode compares that bid with what the transaction
+  that actually took the gap paid and records both (`our_tip_gwei`,
+  `winner_tip_gwei`); scan mode logs every closer's priority fee.
+  Base also builds each 2s block in 200ms "flashblocks", and a competitor a
+  whole flashblock earlier wins whatever it bids, so paper results there are
+  an upper bound.
+- **Aerodrome**, Base's largest DEX, as `type = "solidly"` (Solidly /
+  Velodrome V2 volatile pools; fee read from the factory). Its concentrated
+  "Slipstream" pools and PancakeSwap V3 aren't supported yet.
+- **No sequencer feed**: with `state_source = "logs"`, blocks are announced by
+  the node's own `newHeads` over the same websocket that streams pool events.
+- **L1 data fee**: every OP-stack transaction pays one (`extra_tx_cost_usd`).
+
+Try it in scan mode first. It's free, and it shows whether gaps last longer
+and whether closers pay high fees:
+
+```bash
+cp config.base.example.toml config.base.toml
+# RPC_URL must point at Base, e.g. https://base-mainnet.g.alchemy.com/v2/<key>
+# (enable Base for the key in Alchemy's dashboard)
+python3 run_flash.py selftest --config config.base.toml
+python3 run_flash.py run --config config.base.toml
+```
+
+Results go to `logs_base/`. The summary's `closers found` line gives each
+closer's block position and priority fee, and `gaps.csv` gives gap lifetimes.
+Gaps that often last 2+ blocks, or closers bidding small fees, mean room for a
+small player. If gaps close in the next block to large bids, Base is as
+crowded as Arbitrum. Live mode on Base needs its own deployment of
+`FlashArbitrage` (`deploy --config config.base.toml`).
+
+**Adding another EVM chain** (newer chains have fewer bots, for a while):
+
+1. Copy a config and set `chain_id`, `chain_name`, `log_dir`, the tokens and
+   the DEXes (any Uniswap V2/V3 fork, Camelot V2, Algebra or Solidly/Velodrome
+   V2 pools). Balancer V2's vault and Multicall3 have the same address on most
+   chains; check the vault holds the tokens you want to borrow.
+2. Set `ordering`: `"arrival"` for first-come-first-served sequencers
+   (Arbitrum), `"fee"` for priority-fee ordering (OP-stack chains, most L1s).
+   Set `paper_block_time_ms` to the chain's block time, `paper_timeboost = "off"`
+   off Arbitrum, and `sequencer_feed_url = ""` unless the chain has one.
+3. `selftest`, then a day of scan mode, then paper mode.
+
+Avoid Ethereum mainnet: gas is far higher, and its public mempool lets other
+bots copy or sandwich your transactions.
+
+**Not built: liquidations and liquidity provision.** Liquidating unhealthy
+loans on lending markets is another speed race against the same kind of firms.
+Providing liquidity (earning pool fees) is not a race, but it needs your own
+capital at risk from price moves, and returns scale with that capital rather
+than with the software. Both are separate products with their own risks, not
+settings of this bot.
 
 ## Configuration
 
@@ -397,14 +451,15 @@ Watch `logs/trades.csv` and the `succeeded` / `reverted` counts.
   DEXes. Gaps involving these are flagged, because some charge a hidden
   transfer tax that only simulate mode reveals.
 - **DEXes** (`[dexes.*]`): any Uniswap V2 fork, Uniswap V3 fork, Camelot-style
-  V2 or Algebra-based V3; set `type`, `router_kind` and (for concentrated
-  liquidity) `quoter`.
+  V2, Algebra-based V3 or Solidly/Velodrome V2 (Aerodrome); set `type`,
+  `router_kind` and (for concentrated liquidity) `quoter`.
 - **Risk** (`[risk]`): `min_profit_usd`, `min_pool_liquidity_usd`,
   `max_loan_usd`, gas price cap, daily reverted-gas budget, consecutive-revert
   halt.
-- **Other EVM chains:** change `chain_id`, addresses and RPC. The Balancer
-  vault and Multicall3 share addresses across most chains. Avoid Ethereum
-  mainnet: gas is high and its public mempool invites front-running.
+- **Ordering** (`ordering`, `priority_fee_share`, `extra_tx_cost_usd`): how the
+  chain orders transactions within a block, the bid on fee-ordered chains,
+  and any fixed per-transaction cost such as an L1 data fee.
+- **Other EVM chains:** see [Other chains](#other-chains-base-and-beyond).
 
 ## Tests
 

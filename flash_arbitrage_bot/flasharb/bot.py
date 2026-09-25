@@ -101,6 +101,7 @@ class Stats:
     paper_would_halt: int = 0          # times live mode's revert limit would have stopped the bot
     paper_causes: Counter = field(default_factory=Counter)  # why paper trades didn't fill
     paper_winner_positions: List[Tuple[int, Optional[int]]] = field(default_factory=list)  # lost races
+    paper_bids: List[Tuple[float, float]] = field(default_factory=list)  # fee chains: (our tip, winner's), gwei
     paper_express: Counter = field(default_factory=Counter)  # express lane's state at each order
     paper_decision_ms: List[float] = field(default_factory=list)
     paper_delay_ms: List[float] = field(default_factory=list)
@@ -263,7 +264,8 @@ class FlashBot:
         dec = self.chain.decimals
         fee_rate = getattr(self.chain, "flash_fee_rate", 0.0) or 0.0
         fee_log = math.log1p(fee_rate)  # a route must beat the flash-loan fee too
-        gas_usd = self.cfg.gas_units_estimate * gas_price_wei / 1e18 * prices.get(self.native, 0.0)
+        gas_usd = (self.cfg.gas_units_estimate * gas_price_wei / 1e18 * prices.get(self.native, 0.0)
+                   + self.cfg.extra_tx_cost_usd)
         rates = self._log_rates(self._liquid_pools(prices))
         stats = self.stats
         found = []
@@ -346,18 +348,32 @@ class FlashBot:
                 break
         return None, result
 
+    def _priority_fee(self, opp: Opportunity, prices: Dict[str, float]) -> Tuple[int, float]:
+        """On chains that order by fee: the priority fee to bid, as (wei per gas,
+        USD in total). A share of what the trade is expected to make above
+        min_profit_usd, so a win still keeps the rest."""
+        if self.cfg.ordering != "fee":
+            return 0, 0.0
+        tip_usd = self.cfg.priority_fee_share * max(0.0, opp.net_usd - self.cfg.risk.min_profit_usd)
+        eth_usd = prices.get(self.native, 0.0)
+        if tip_usd <= 0 or eth_usd <= 0:
+            return 0, 0.0
+        return int(tip_usd / eth_usd * 1e18 / self.cfg.gas_units_estimate), tip_usd
+
     def _act(self, opp: Opportunity, prices: Dict[str, float]) -> bool:
         """Simulate mode: dry-run the trade. Live mode: send it. Returns True when a
         transaction was attempted (at most one per block, one in flight)."""
         dec = self.chain.decimals
         start = opp.route.start
-        # On-chain floor: the trade must clear estimated gas plus the minimum profit.
-        # (The contract must also repay the loan's fee, so that's covered on-chain.)
-        min_profit_raw = from_usd(opp.gas_usd + self.cfg.risk.min_profit_usd, start, prices, dec)
+        tip_wei, tip_usd = self._priority_fee(opp, prices)
+        # On-chain floor: the trade must clear estimated gas (and any priority fee
+        # bid) plus the minimum profit. (The contract must also repay the loan's
+        # fee, so that's covered on-chain.)
+        min_profit_raw = from_usd(opp.gas_usd + tip_usd + self.cfg.risk.min_profit_usd, start, prices, dec)
         amount = opp.amount_in
         self.last_sim_failed = False
         if self.cfg.mode == "paper":
-            return self._paper_order(opp, prices, min_profit_raw)
+            return self._paper_order(opp, prices, min_profit_raw, tip_wei, tip_usd)
         if self.cfg.mode == "simulate" or self.cfg.presimulate_live:
             amount, sim = self._simulate(opp, min_profit_raw)
             self.last_sim_failed = amount is None
@@ -384,7 +400,7 @@ class FlashBot:
         # Straight out: no dry run (unless presimulate_live). If the gap is gone by
         # the time it lands, the contract's profit check reverts it for ~gas only.
         try:
-            tx_hash = self.executor.submit(opp.route, amount, min_profit_raw)
+            tx_hash = self.executor.submit(opp.route, amount, min_profit_raw, priority_fee_wei=tip_wei)
         except Exception as exc:
             self._log_opportunity(opp, f"send failed: {describe(exc)}")
             log.warning("send failed: %s", describe(exc))
@@ -486,7 +502,8 @@ class FlashBot:
             return None
         return next((o.amount_in for o in outcomes if o.ok and o.profit_raw >= min_profit_raw), None)
 
-    def _paper_order(self, opp: Opportunity, prices: Dict[str, float], min_profit_raw: int) -> bool:
+    def _paper_order(self, opp: Opportunity, prices: Dict[str, float], min_profit_raw: int,
+                     tip_wei: int = 0, tip_usd: float = 0.0) -> bool:
         """Paper mode: everything live mode does before sending, then a paper order
         instead of a transaction. Returns True when an order was placed."""
         amount = opp.amount_in
@@ -510,8 +527,8 @@ class FlashBot:
         order = self.paper.place(
             opp.route, opp.route.describe(self.symbols), amount, min_profit_raw, self.last_block, decision_ms,
             source, prices, est_profit_usd=to_usd(opp.route.amount_out(amount) - amount, start, prices, dec),
-            est_fee_usd=to_usd(flash_fee(amount, fee_rate), start, prices, dec), est_gas_usd=opp.gas_usd,
-            timeboost_ms=hold_ms, express_lane=express, chain_head=head)
+            est_fee_usd=to_usd(flash_fee(amount, fee_rate), start, prices, dec), est_gas_usd=opp.gas_usd + tip_usd,
+            timeboost_ms=hold_ms, express_lane=express, chain_head=head, tip_wei=tip_wei)
         key = cycle_key(opp.route)
         self._paper_open.add(key)
         self._paper_key[order.paper_id] = key
@@ -558,6 +575,8 @@ class FlashBot:
                     s.paper_causes[fill.cause] += 1
                 if fill.status == "lost_race" and fill.winner is not None:
                     s.paper_winner_positions.append((fill.winner_position, fill.winner_block_txs))
+                if fill.winner is not None and fill.winner.get("tip_wei") is not None and self.cfg.ordering == "fee":
+                    s.paper_bids.append((order.tip_wei / 1e9, fill.winner["tip_wei"] / 1e9))
                 # Live mode's limits see paper results too. Its revert limit would stop
                 # the bot; paper mode notes that and carries on collecting data.
                 self.risk.record_send(fill.success, fill.gas_usd)
@@ -604,6 +623,8 @@ class FlashBot:
             winner_block_txs=fill.winner_block_txs or "", winner_tx=w.get("tx_hash", ""), winner_to=w.get("to", ""),
             winner_timeboosted="" if w.get("timeboosted") is None else w["timeboosted"],
             winner_kind=w.get("kind", ""),
+            our_tip_gwei=rnd(o.tip_wei / 1e9, 6) if self.cfg.ordering == "fee" else "",
+            winner_tip_gwei="" if w.get("tip_wei") is None else rnd(w["tip_wei"] / 1e9, 6),
             # Roughly how far into the landing block's 250ms window this trade would
             # have reached the sequencer (transactions are ordered by arrival).
             our_ms_into_block=round(o.delay_ms - (o.blocks_late - 1) * self.cfg.paper_block_time_ms),
@@ -643,6 +664,11 @@ class FlashBot:
             shown = ", ".join(f"{pos}/{n}" if n else f"{pos}" for pos, n in s.paper_winner_positions[-8:])
             lines.append(f"    lost races (since start): the winner was among the first 2 transactions of its "
                          f"block in {first_two} of {len(s.paper_winner_positions)}; positions: {shown}")
+        if s.paper_bids:
+            won = sum(1 for ours, theirs in s.paper_bids if ours > theirs)
+            lines.append(f"    priority-fee contests (since start): outbid the other transaction in {won} of "
+                         f"{len(s.paper_bids)}; median bid ours {_percentile([b[0] for b in s.paper_bids], 0.5):.4g} "
+                         f"gwei vs theirs {_percentile([b[1] for b in s.paper_bids], 0.5):.4g} gwei")
         if s.paper_would_halt:
             lines.append(f"    live mode would have halted {s.paper_would_halt}x "
                          f"({cfg.risk.max_consecutive_reverts} reverts in a row); paper mode kept going")
@@ -887,7 +913,7 @@ class FlashBot:
         feed = self.feed
         if feed is None or self._feed_given_up or not feed.healthy():
             return False
-        if self._feed_ok:
+        if self._feed_ok or getattr(feed, "trusted", False):  # the node's own heads need no check
             return True
         now = self._clock()
         if now - self._feed_checked_at < 2.0:

@@ -65,11 +65,21 @@ def first_taker(chain, pools, lo: int, hi: int) -> Optional[Dict]:
     info = txs[tx_hash]
     receipt = chain.receipt_raw(tx_hash) or {}
     touched = len(info["pools"] & pools)
+    # What it bid: the priority fee is what it paid per gas above the block's base fee.
+    tip = None
+    base_fee = getattr(chain, "block_base_fee", None)
+    if receipt.get("effectiveGasPrice") and base_fee is not None:
+        try:
+            base = base_fee(info["block"])
+            if base is not None:
+                tip = max(0, int(receipt["effectiveGasPrice"], 16) - base)
+        except Exception as exc:  # optional detail: never lose the rest over it
+            log.debug("base fee of block %d: %s", info["block"], describe(exc))
     return {"tx_hash": tx_hash, "block": info["block"], "index": info["index"], "txs_in_window": len(txs),
             "from": receipt.get("from") or "", "to": receipt.get("to") or "",
             "timeboosted": _flag(receipt.get("timeboosted")), "touched": touched, "of": len(pools),
             "gas_used": int(receipt["gasUsed"], 16) if receipt.get("gasUsed") else "",
-            "kind": "arbitrage (2+ route pools)" if touched >= 2 else "single-pool trade"}
+            "kind": "arbitrage (2+ route pools)" if touched >= 2 else "single-pool trade", "tip_wei": tip}
 
 
 class CloserTracer:
@@ -111,7 +121,7 @@ class CloserTracer:
         return {"route": gap.route, "first_block": gap.first_block, "last_open_block": gap.last_open,
                 "closed_by_block": gap.closed_by, "closer_block": "", "blocks_after_last_open": "",
                 "tx_index": "", "tx_hash": "", "from": "", "to": "", "timeboosted": "",
-                "pools_touched": "", "txs_in_window": 0, "gas_used": "", "kind": ""}
+                "pools_touched": "", "txs_in_window": 0, "gas_used": "", "priority_fee_gwei": "", "kind": ""}
 
     def trace(self, gap: GapRecord) -> Dict:
         lo = gap.last_open + 1
@@ -128,6 +138,7 @@ class CloserTracer:
             "tx_index": taker["index"], "tx_hash": taker["tx_hash"], "from": taker["from"], "to": taker["to"],
             "timeboosted": taker["timeboosted"], "pools_touched": f"{taker['touched']}/{taker['of']}",
             "txs_in_window": taker["txs_in_window"], "gas_used": taker["gas_used"], "kind": taker["kind"],
+            "priority_fee_gwei": "" if taker["tip_wei"] is None else round(taker["tip_wei"] / 1e9, 6),
         })
         if row["timeboosted"] is None:
             row["timeboosted"] = ""  # receipt had no timeboosted field
@@ -149,6 +160,9 @@ class CloserTracer:
         line = (f"closers found: {len(found)} of {len(rows)} gaps (express lane {boosted}, regular {regular}"
                 f"{f', unknown {unknown}' if unknown else ''}); arbitrage bots {arbs}; "
                 f"landed in the very next block {next_block} ({early} among its first 2 transactions)")
+        tips = sorted(r["priority_fee_gwei"] for r in found if r.get("priority_fee_gwei") not in ("", None))
+        if tips and any(tips):
+            line += f"; closers' priority fee median {tips[len(tips) // 2]:.4g} gwei (max {tips[-1]:.4g})"
         top = Counter(r["to"].lower() for r in found if r["to"]).most_common(1)
         if top and top[0][1] > 1:
             line += f"; most frequent closer contract {top[0][0]} ({top[0][1]}x)"

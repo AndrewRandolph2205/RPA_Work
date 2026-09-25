@@ -18,11 +18,15 @@ Q96 = 2 ** 96
 FEE_DENOMINATOR = 1_000_000  # fees are in parts per million: 3000 = 0.30%
 
 # Router interface -> Step.kind in FlashArbitrage.sol
-ROUTER_KINDS = {"v2": 0, "v3_router02": 1, "v3_router": 2, "camelot_v2": 3, "algebra": 4}
+ROUTER_KINDS = {"v2": 0, "v3_router02": 1, "v3_router": 2, "camelot_v2": 3, "algebra": 4, "solidly": 5}
 
 # Pool types. "camelot_v2" is a V2-style pair with per-direction fees;
-# "algebra" is Camelot V3 (concentrated liquidity, one pool per pair, dynamic fees).
-POOL_TYPES = ("v2", "v3", "camelot_v2", "algebra")
+# "algebra" is Camelot V3 (concentrated liquidity, one pool per pair, dynamic fees);
+# "solidly" is a Solidly/Velodrome V2 volatile pool (Aerodrome on Base): constant
+# product, fee set per pool by the factory. Their "stable" pools use another curve
+# and are never discovered.
+POOL_TYPES = ("v2", "v3", "camelot_v2", "algebra", "solidly")
+V2_STYLE = ("v2", "camelot_v2", "solidly")   # reserves from getReserves(), constant-product math
 CONCENTRATED = ("v3", "algebra")
 DYNAMIC_FEE = ("camelot_v2", "algebra")
 
@@ -107,8 +111,13 @@ class Pool:
         r_in, r_out = self.reserves_for(token_in)
         if amount_in <= 0 or r_in <= 0 or r_out <= 0:
             return 0
-        with_fee = amount_in * (FEE_DENOMINATOR - self.fee_for(token_in))
-        out = with_fee * r_out // (r_in * FEE_DENOMINATOR + with_fee)
+        if self.kind == "solidly":
+            # Velodrome V2 Pool.getAmountOut: the fee (basis points) comes off the input first.
+            after_fee = amount_in - amount_in * (self.fee_for(token_in) // 100) // 10_000
+            out = after_fee * r_out // (r_in + after_fee)
+        else:
+            with_fee = amount_in * (FEE_DENOMINATOR - self.fee_for(token_in))
+            out = with_fee * r_out // (r_in * FEE_DENOMINATOR + with_fee)
         if self.balance0 is not None and self.balance1 is not None:
             # A pool can never pay out more than it holds.
             out = min(out, self.balance1 if token_in == self.token0 else self.balance0)

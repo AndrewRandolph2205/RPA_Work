@@ -135,8 +135,10 @@ class ContractExecutor:
     def _sync_nonce(self) -> None:
         self.nonce = int(self.chain.w3.eth.get_transaction_count(self.owner, "pending"))
 
-    def submit(self, route: Route, amount: int, min_profit: int) -> str:
-        """Sign and send one execute() transaction; returns its hash without waiting."""
+    def submit(self, route: Route, amount: int, min_profit: int, priority_fee_wei: int = 0) -> str:
+        """Sign and send one execute() transaction; returns its hash without waiting.
+        `priority_fee_wei` (per gas) is the bid on chains that order by fee; on
+        Arbitrum, which orders by arrival, it stays 0."""
         if self.account is None:
             raise RuntimeError("PRIVATE_KEY is required to send transactions")
         if self.nonce is None or self._watcher is None:
@@ -145,8 +147,8 @@ class ContractExecutor:
         tx = {
             "to": self.contract.address, "data": "0x" + self.calldata(route, amount, min_profit).hex(),
             "value": 0, "gas": self.gas_limit, "nonce": self.nonce, "chainId": self.chain.cfg.chain_id,
-            "type": 2, "maxPriorityFeePerGas": 0,  # Arbitrum orders by arrival, not tips
-            "maxFeePerGas": max(2 * gas_price, gas_price + 10 ** 7),
+            "type": 2, "maxPriorityFeePerGas": int(priority_fee_wei),
+            "maxFeePerGas": max(2 * gas_price, gas_price + 10 ** 7) + int(priority_fee_wei),
         }
         signed = self.account.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction

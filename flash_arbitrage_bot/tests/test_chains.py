@@ -1,0 +1,179 @@
+"""Other chains: Solidly/Aerodrome pools, fee-ordered sequencers (priority-fee bids), newHeads as the block source."""
+
+import csv
+import json
+import logging
+import tempfile
+import unittest
+
+from flasharb.amm import ROUTER_KINDS
+from flasharb.bot import FlashBot
+from flasharb.closers import first_taker
+from flasharb.config import validate
+from flasharb.journal import Journal
+from flasharb.logstate import HeadFeed, apply_event, decode_log
+from flasharb.paper import PaperTrader
+from flasharb.risk import RiskManager
+from flasharb.simulator import route_steps
+from tests.test_flasharb import E6, E18, USDC, WETH, FakeChain, FakeExecutor, make_config, pool
+from tests.test_logstate import TOPIC, TOPICS, FakeClock, head, log_entry, logmsg, subscribed_stream
+from tests.test_paper import verify_by_block
+
+GWEI = 10 ** 9
+
+
+class SolidlyPoolTests(unittest.TestCase):
+    def test_amount_out_matches_velodrome_get_amount_out(self):
+        p = pool("aero", WETH, USDC, 100 * E18, 200_000 * E6, fee=3000, kind="solidly")  # 30 bps
+        amount = 12_345_678_901_234_567
+        after_fee = amount - amount * 30 // 10_000
+        self.assertEqual(p.amount_out(WETH, amount), after_fee * 200_000 * E6 // (100 * E18 + after_fee))
+        self.assertEqual(p.label, "aero/0.3%")
+
+    def test_route_step_is_kind_5_without_a_fee(self):
+        a = pool("aero", WETH, USDC, 100 * E18, 200_000 * E6, kind="solidly")
+        a.router_kind = "solidly"
+        b = pool("uni", WETH, USDC, 100 * E18, 201_000 * E6)
+        from flasharb.routes import Route
+        steps = route_steps(Route((a, b), (WETH, USDC, WETH)))
+        self.assertEqual((steps[0][0], steps[0][4]), (ROUTER_KINDS["solidly"], 0))
+
+    def test_solidly_sync_event(self):
+        p = pool("aero", WETH, USDC, E18, E18, kind="solidly")
+        entry = log_entry("sync_solidly", p.address, 5, 0, data=(3 * E18, 4 * E18))
+        self.assertTrue(apply_event(p, decode_log(entry, TOPICS)))
+        self.assertEqual((p.reserve0, p.reserve1), (3 * E18, 4 * E18))
+        self.assertIn("sync_solidly", TOPIC)
+
+
+class HeadFeedTests(unittest.TestCase):
+    def test_announces_the_nodes_heads(self):
+        clock = FakeClock()
+        stream = subscribed_stream(clock)
+        feed = HeadFeed(stream)
+        self.assertFalse(feed.healthy())                 # no head yet
+        self.assertIsNone(feed.wait_for_block_after(None, timeout=0))
+        stream.handle_message(head(100))
+        self.assertTrue(feed.healthy())
+        self.assertEqual(feed.wait_for_block_after(99, timeout=0), 100)
+        self.assertIsNone(feed.wait_for_block_after(100, timeout=0))
+        clock.t += 0.05
+        self.assertAlmostEqual(feed.age_ms(100), 50.0)
+        self.assertIs(feed.express_lane_state(), False)
+        clock.t += 30
+        self.assertFalse(feed.healthy())                 # stale
+
+    def test_bot_trusts_it_without_a_hash_check(self):
+        stream = subscribed_stream(FakeClock())
+        stream.handle_message(head(1))
+        cfg = make_config("scan", tempfile.mkdtemp())
+        bot = FlashBot(cfg, FakeChain([pool("a", WETH, USDC, E18, E18)]), None, RiskManager(cfg.risk),
+                       Journal(cfg.log_dir), feed=HeadFeed(stream))
+        self.assertTrue(bot._feed_usable())
+
+
+class FeeOrderingTests(unittest.TestCase):
+    """A Base-like chain: the sequencer puts the higher priority fee first."""
+
+    def setUp(self):
+        logging.disable(logging.WARNING)
+        self.tmp = tempfile.mkdtemp()
+        self.cheap = pool("cheap", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        self.dear = pool("dear", WETH, USDC, 1000 * E18, 2_050_000 * E6)
+
+    def tearDown(self):
+        logging.disable(logging.NOTSET)
+
+    def cfg(self, mode, **settings):
+        cfg = make_config(mode, self.tmp)
+        cfg.ordering, cfg.priority_fee_share, cfg.extra_tx_cost_usd = "fee", 0.5, 0.01
+        for key, value in settings.items():
+            setattr(cfg, key, value)
+        validate(cfg)
+        return cfg
+
+    def paper_bot(self, winner_tip_wei, **settings):
+        cfg = self.cfg("paper", paper_send_latency_ms=20.0, paper_timeboost="off", **settings)
+        chain = FakeChain([self.cheap, self.dear])
+        chain.verify_route = verify_by_block(gone_from=102)   # someone takes it inside block 102
+        a, b = self.cheap.address, self.dear.address
+        log = lambda addr: {"blockNumber": hex(102), "transactionIndex": "0x4",  # noqa: E731
+                            "logIndex": "0x0", "transactionHash": "0xrival", "address": addr}
+        chain.logs_for = lambda pools, lo, hi: [log(a), log(b)]
+        base = 10 ** 7
+        chain.receipt_raw = lambda h: {"to": "0xbot", "effectiveGasPrice": hex(base + winner_tip_wei)}
+        chain.block_base_fee = lambda n: base
+        chain.block_tx_count = lambda n: 10
+        bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(self.tmp),
+                       paper=PaperTrader(chain, cfg, background=False))
+        bot._decision_latency = lambda: (10.0, "feed")
+        return bot
+
+    def rows(self):
+        with open(f"{self.tmp}/paper_trades.csv") as fh:
+            return list(csv.DictReader(fh))
+
+    def test_outbidding_the_winner_fills(self):
+        bot = self.paper_bot(winner_tip_wei=1)
+        bot.step()
+        bot.step()
+        row = self.rows()[0]
+        self.assertEqual(row["status"], "filled")
+        self.assertIn("outbid the transaction that took it", row["reason"])
+        self.assertGreater(float(row["our_tip_gwei"]), float(row["winner_tip_gwei"]))
+        # the bid and the L1 fee are part of the cost
+        self.assertGreater(float(row["gas_usd"]), 0.01)
+
+    def test_a_higher_bid_wins_instead(self):
+        bot = self.paper_bot(winner_tip_wei=10 ** 6 * GWEI)
+        bot.step()
+        bot.step()
+        row = self.rows()[0]
+        self.assertEqual((row["status"], row["cause"]), ("lost_race", "outbid in landing block"))
+        self.assertEqual(row["winner_tip_gwei"], str(float(10 ** 6)))
+        self.assertIn("outbid the other transaction in 0 of 1", bot.summary())
+
+    def test_no_bid_on_arrival_ordered_chains(self):
+        cfg = make_config("live", self.tmp)
+        ex = FakeExecutor()
+        FlashBot(cfg, FakeChain([self.cheap, self.dear]), ex, RiskManager(cfg.risk), Journal(self.tmp)).step()
+        self.assertEqual(ex.tips, [0])
+
+    def test_live_bids_a_share_of_the_expected_profit(self):
+        cfg = self.cfg("live")
+        ex = FakeExecutor()
+        bot = FlashBot(cfg, FakeChain([self.cheap, self.dear]), ex, RiskManager(cfg.risk), Journal(self.tmp))
+        bot.build_routes()
+        opps = bot.find_opportunities(bot._prices(), bot.chain.gas_price_wei())
+        tip_wei, tip_usd = bot._priority_fee(opps[0], bot._prices())
+        self.assertAlmostEqual(tip_usd, 0.5 * (opps[0].net_usd - cfg.risk.min_profit_usd), places=6)
+        bot.step()
+        self.assertEqual(len(ex.sent), 1)
+        self.assertGreater(ex.tips[0], 0)
+
+    def test_config_checks(self):
+        with self.assertRaises(ValueError):
+            self.cfg("scan", ordering="gas")
+        with self.assertRaises(ValueError):
+            self.cfg("scan", priority_fee_share=1.5)
+
+
+class FirstTakerTests(unittest.TestCase):
+    def test_reports_the_winners_priority_fee(self):
+        class Chain:
+            def logs_for(self, pools, lo, hi):
+                return [{"blockNumber": "0x5", "transactionIndex": "0x2", "logIndex": "0x0",
+                         "transactionHash": "0xabc", "address": "0xp1"}]
+
+            def receipt_raw(self, h):
+                return {"effectiveGasPrice": hex(3 * GWEI), "from": "0xf", "to": "0xt"}
+
+            def block_base_fee(self, n):
+                return GWEI
+
+        taker = first_taker(Chain(), ["0xp1", "0xp2"], 5, 5)
+        self.assertEqual((taker["index"], taker["tip_wei"], taker["kind"]), (2, 2 * GWEI, "single-pool trade"))
+
+
+if __name__ == "__main__":
+    unittest.main()

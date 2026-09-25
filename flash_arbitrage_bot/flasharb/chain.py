@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
 
 from . import discovery
-from .amm import Pool
+from .amm import V2_STYLE, Pool
 from .logstate import LATEST, apply_event, drifted, pool_state
 from .config import Config
 from .routes import flash_fee, usd_prices
@@ -219,12 +219,15 @@ class Chain:
         """(token0, token1, reserve0, reserve1) for the newest pairs of every V2-style factory."""
         records: List[discovery.PairRecord] = []
         for dex in self.cfg.dexes.values():
-            if dex.type not in ("v2", "camelot_v2"):
+            if dex.type not in V2_STYLE:
                 continue
-            data = self.call_many([(dex.factory, self.selector("allPairsLength()"))])[0]
+            # Solidly-style factories name their list "pools" instead of "pairs".
+            length, item = (("allPoolsLength()", "allPools(uint256)") if dex.type == "solidly"
+                            else ("allPairsLength()", "allPairs(uint256)"))
+            data = self.call_many([(dex.factory, self.selector(length))])[0]
             total = self.decode(["uint256"], data)[0] if data else 0
             first = max(0, total - self.cfg.discovery.max_pairs_per_factory)
-            all_pairs = self.selector("allPairs(uint256)")
+            all_pairs = self.selector(item)
             results = self.call_many([(dex.factory, all_pairs + self.encode(["uint256"], [i]))
                                       for i in range(first, total)])
             pairs = [self.decode(["address"], r)[0].lower() for r in results if r]
@@ -237,7 +240,7 @@ class Chain:
                 t0, t1, res = info[3 * i], info[3 * i + 1], info[3 * i + 2]
                 if not (t0 and t1 and res and len(res) >= 64):
                     continue
-                r0, r1 = self.decode(["uint112", "uint112"], res[:64])
+                r0, r1 = self.decode(["uint256", "uint256"], res[:64])
                 records.append((self.decode(["address"], t0)[0].lower(),
                                 self.decode(["address"], t1)[0].lower(), r0, r1))
             log.info("  %s: scanned %d of %d pairs", dex.name, len(pairs), total)
@@ -297,6 +300,7 @@ class Chain:
         get_pair = self.selector("getPair(address,address)")
         get_pool = self.selector("getPool(address,address,uint24)")
         pool_by_pair = self.selector("poolByPair(address,address)")
+        get_volatile = self.selector("getPool(address,address,bool)")
         calls, meta = [], []
         for dex in self.cfg.dexes.values():
             for a, b in token_pairs:
@@ -304,6 +308,10 @@ class Chain:
                 pair = self.encode(["address", "address"], [self.cs(t0), self.cs(t1)])
                 if dex.type in ("v2", "camelot_v2"):
                     calls.append((dex.factory, get_pair + pair))
+                    meta.append((dex, t0, t1, dex.fee))
+                elif dex.type == "solidly":  # the volatile pool only: stable pools use another curve
+                    calls.append((dex.factory, get_volatile + self.encode(
+                        ["address", "address", "bool"], [self.cs(t0), self.cs(t1), False])))
                     meta.append((dex, t0, t1, dex.fee))
                 elif dex.type == "algebra":  # one pool per pair, fee read each block
                     calls.append((dex.factory, pool_by_pair + pair))
@@ -323,7 +331,22 @@ class Chain:
             pools.append(Pool(address=address, dex=dex.name, kind=dex.type, token0=t0, token1=t1,
                               fee_ppm=fee, router=dex.router, router_kind=dex.router_kind,
                               quoter=dex.quoter if dex.type in ("v3", "algebra") else ""))
-        return self._drop_stable_pairs(pools)
+        return self._read_solidly_fees(self._drop_stable_pairs(pools))
+
+    def _read_solidly_fees(self, pools: List[Pool]) -> List[Pool]:
+        """Solidly factories set each pool's fee (basis points; custom fees are
+        possible). Read once at discovery; exact checks catch a later change."""
+        solidly = [p for p in pools if p.kind == "solidly"]
+        if not solidly:
+            return pools
+        factories = {d.name: d.factory for d in self.cfg.dexes.values()}
+        get_fee = self.selector("getFee(address,bool)")
+        results = self.call_many([(factories[p.dex], get_fee + self.encode(
+            ["address", "bool"], [self.cs(p.address), False])) for p in solidly])
+        for pool, data in zip(solidly, results):
+            if data:
+                pool.fee_ppm = self.decode(["uint256"], data)[0] * 100
+        return pools
 
     def _drop_stable_pairs(self, pools: List[Pool]) -> List[Pool]:
         """Camelot V2 "stable" pairs use a different curve (x^3y + y^3x), which the
@@ -441,6 +464,12 @@ class Chain:
         block = self._result("eth_getBlockByNumber", [hex(number), False])
         return block.get("hash") if block else None
 
+    def block_base_fee(self, number: int) -> Optional[int]:
+        """baseFeePerGas of a block (wei), for working out what priority fee a transaction paid."""
+        block = self._result("eth_getBlockByNumber", [hex(number), False])
+        fee = block.get("baseFeePerGas") if block else None
+        return int(fee, 16) if fee else None
+
     def block_tx_count(self, number: int) -> Optional[int]:
         count = self._result("eth_getBlockTransactionCountByNumber", [hex(number)])
         return None if count is None else int(count, 16)
@@ -472,6 +501,8 @@ class Chain:
         RPC node catches up (feeds run ahead of RPC providers). With a pool event
         stream attached, the block's events are applied instead and the pools are
         only re-read periodically. Without `block`, the RPC's latest block is read."""
+        if self.logs is not None and self.tracked is not None:
+            self.logs.watch(self.tracked)  # also starts the subscription (chains without a feed need it)
         if self.logs is not None and block is not None and not full and self.tracked is not None:
             served = self._refresh_from_logs(block, wait_s)
             if served is not None:
@@ -481,7 +512,6 @@ class Chain:
     def _refresh_from_logs(self, block: int, wait_s: float) -> Optional[int]:
         """Serve `block` from pool events. None = read it over RPC instead."""
         stream = self.logs
-        stream.watch(self.tracked)
         if not stream.ready():
             return None  # (re)connecting: RPC reads until the subscription is live
         if block == self._last_block:
@@ -554,7 +584,7 @@ class Chain:
 
         calls = []
         for pool in pools:
-            if pool.kind in ("v2", "camelot_v2"):
+            if pool.kind in V2_STYLE:
                 calls.append((pool.address, get_reserves))
             else:
                 state = slot0 if pool.kind == "v3" else global_state
@@ -565,10 +595,13 @@ class Chain:
         data, block = self._read_at(calls, block, wait_s)
         results = iter(data)
         for pool in pools:
-            if pool.kind in ("v2", "camelot_v2"):
+            if pool.kind in V2_STYLE:
                 data = next(results)
                 if data is None:
                     pool.update_v2(0, 0)
+                elif pool.kind == "solidly":  # (uint256 reserve0, uint256 reserve1, uint256 timestamp)
+                    r0, r1 = self.decode(["uint256", "uint256"], data[:64])
+                    pool.update_v2(r0, r1)
                 elif pool.kind == "v2":
                     r0, r1, _ = self.decode(["uint112", "uint112", "uint32"], data)
                     pool.update_v2(r0, r1)

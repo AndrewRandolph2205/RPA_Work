@@ -20,7 +20,7 @@ class Journal:
                     "real_net_usd", "result", "cause", "hop", "detail"]
     CLOSER_FIELDS = ["time", "route", "first_block", "last_open_block", "closed_by_block", "closer_block",
                      "blocks_after_last_open", "tx_index", "tx_hash", "from", "to", "timeboosted",
-                     "pools_touched", "txs_in_window", "gas_used", "kind"]
+                     "pools_touched", "txs_in_window", "gas_used", "priority_fee_gwei", "kind"]
     # One row per paper order (paper mode), written once it has settled.
     PAPER_FIELDS = ["time", "paper_id", "status", "cause", "route", "pools", "amount_in", "amount_in_usd",
                     "decided_at", "detect_block", "chain_head_block", "blocks_behind", "decision_ms",
@@ -31,7 +31,7 @@ class Journal:
                     "amount_out", "profit_usd", "flash_fee_usd", "gas_units", "gas_price_gwei", "gas_usd",
                     "net_usd", "zero_delay_net_usd", "latency_cost_usd", "check_method", "reason",
                     "winner_block", "winner_position", "winner_block_txs", "winner_tx", "winner_to",
-                    "winner_timeboosted", "winner_kind", "our_ms_into_block",
+                    "winner_timeboosted", "winner_kind", "our_ms_into_block", "our_tip_gwei", "winner_tip_gwei",
                     "cum_orders", "cum_settled", "cum_filled", "cum_net_usd", "cum_gas_usd", "fill_rate"]
 
     def __init__(self, log_dir: str):
