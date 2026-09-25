@@ -85,6 +85,16 @@ class Config:
     # "fee" chains: never bid less than this per gas (Polygon's validators drop
     # transactions tipping under ~25-30 gwei).
     min_priority_fee_gwei: float = 0.0
+    # "fee" chains: "share" always bids priority_fee_share of the expected profit;
+    # "learned" bids just above what winning transactions paid for gaps of a similar
+    # size (bid_percentile of them, plus bid_margin), once paper trading has seen
+    # enough of them, and never more than "share" would.
+    bid_strategy: str = "share"
+    bid_percentile: float = 0.75
+    bid_margin: float = 0.10
+    # Trades in flight at once (live and paper modes). Above 1, a new trade must
+    # not touch any pool an earlier one in flight uses.
+    max_inflight: int = 1
     # A fixed cost per transaction on top of L2 gas, e.g. the L1 data fee every
     # OP-stack transaction pays (a few tenths of a cent on Base).
     extra_tx_cost_usd: float = 0.0
@@ -214,6 +224,12 @@ def validate(cfg: Config) -> None:
         raise ValueError(f"ordering must be one of {ORDERINGS}, got {cfg.ordering!r}")
     if not 0 <= cfg.priority_fee_share <= 1:
         raise ValueError("priority_fee_share must be between 0 and 1")
+    if cfg.bid_strategy not in ("share", "learned"):
+        raise ValueError(f"bid_strategy must be \"share\" or \"learned\", got {cfg.bid_strategy!r}")
+    if not 0 < cfg.bid_percentile <= 1 or cfg.bid_margin < 0:
+        raise ValueError("bid_percentile must be in (0, 1] and bid_margin can't be negative")
+    if cfg.max_inflight < 1:
+        raise ValueError("max_inflight must be at least 1")
     if cfg.min_priority_fee_gwei < 0:
         raise ValueError("min_priority_fee_gwei can't be negative")
     if cfg.extra_tx_cost_usd < 0:

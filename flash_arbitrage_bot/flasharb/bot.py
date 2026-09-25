@@ -22,6 +22,7 @@ from .amm import FEE_DENOMINATOR
 from .closers import GapRecord
 from .config import Config
 from .errors import describe, http_status
+from .bidding import BidBook
 from .feed import check_offset
 from .journal import Journal
 from .paper import PaperFill, PaperTrader
@@ -167,6 +168,11 @@ class FlashBot:
         # Feed block numbers are trusted only once they match the RPC's.
         self._feed_ok = False
         self._state_prev: Dict[str, int] = {}  # chain.state_stats at the last summary
+        self.bids = BidBook(cfg.bid_percentile, cfg.bid_margin)
+        if cfg.ordering == "fee" and cfg.bid_strategy == "learned":
+            seeded = self.bids.load_paper_csvs(cfg.log_dir)
+            if seeded:
+                log.info("learned bidding: %d winning bids from earlier paper runs", seeded)
         self._feed_checked_at = float("-inf")
         self._feed_given_up = False
 
@@ -359,6 +365,11 @@ class FlashBot:
         if eth_usd <= 0:
             return 0, 0.0
         tip_wei = int(tip_usd / eth_usd * 1e18 / self.cfg.gas_units_estimate)
+        if self.cfg.bid_strategy == "learned":
+            learned = self.bids.suggest(opp.profit_usd - opp.fee_usd)
+            if learned is not None and learned < tip_wei:  # enough to win, no more
+                tip_wei = learned
+                tip_usd = tip_wei * self.cfg.gas_units_estimate / 1e18 * eth_usd
         floor = int(self.cfg.min_priority_fee_gwei * 1e9)
         if tip_wei < floor:  # the network's minimum tip: the bid can't go below it
             tip_wei = floor
@@ -587,6 +598,7 @@ class FlashBot:
                     s.paper_winner_positions.append((fill.winner_position, fill.winner_block_txs))
                 if fill.winner is not None and fill.winner.get("tip_wei") is not None and self.cfg.ordering == "fee":
                     s.paper_bids.append((order.tip_wei / 1e9, fill.winner["tip_wei"] / 1e9))
+                    self.bids.add(order.est_profit_usd - order.est_fee_usd, fill.winner["tip_wei"])
                 # Live mode's limits see paper results too. Its revert limit would stop
                 # the bot; paper mode notes that and carries on collecting data.
                 self.risk.record_send(fill.success, fill.gas_usd)
@@ -674,6 +686,13 @@ class FlashBot:
             shown = ", ".join(f"{pos}/{n}" if n else f"{pos}" for pos, n in s.paper_winner_positions[-8:])
             lines.append(f"    lost races (since start): the winner was among the first 2 transactions of its "
                          f"block in {first_two} of {len(s.paper_winner_positions)}; positions: {shown}")
+        if cfg.ordering == "fee" and cfg.bid_strategy == "learned":
+            typical = self.bids.typical()
+            state = (f"{len(self.bids)} winning bids seen; winners' {cfg.bid_percentile:.0%} level "
+                     f"{typical / 1e9:.4g} gwei" if typical is not None and len(self.bids) >= self.bids.min_samples
+                     else f"still learning ({len(self.bids)} of {self.bids.min_samples} winning bids seen; "
+                          f"bidding priority_fee_share meanwhile)")
+            lines.append(f"    learned bidding: {state}")
         if s.paper_bids:
             won = sum(1 for ours, theirs in s.paper_bids if ours > theirs)
             lines.append(f"    priority-fee contests (since start): outbid the other transaction in {won} of "
@@ -790,6 +809,9 @@ class FlashBot:
         self.stats.candidates += len(opps)
 
         keys = set()
+        # Pools that trades in flight (or sent this block) already use: a second
+        # trade through any of them would chase the same prices.
+        busy = {p.address for o, _, _ in self._inflight.values() for p in o.route.pools}
         for opp in opps:
             # A cycle is the same trade whichever token it starts from
             # (A->B->C->A == B->C->A->B); the opposite direction is another trade.
@@ -806,8 +828,12 @@ class FlashBot:
                         self._open_gaps[key] = [block, block, opp.route.describe(self.symbols), real_net,
                                                 tuple(p.address for p in opp.route.pools)]
                 continue
-            if self.cfg.mode in ("live", "paper") and self._inflight:
-                break  # one transaction in flight at a time: a second would chase the same gap
+            pools = {p.address for p in opp.route.pools}
+            if self.cfg.mode in ("live", "paper"):
+                if len(self._inflight) >= self.cfg.max_inflight:
+                    break
+                if pools & busy:
+                    continue  # shares a pool with a trade in flight
             if self._cooldown.get(key, -1) >= block or key in self._open_simulated or key in self._paper_open:
                 continue
             attempted = self._act(opp, prices)
@@ -816,7 +842,9 @@ class FlashBot:
             elif attempted and self.cfg.mode == "simulate":
                 self._open_simulated.add(key)
             if attempted:
-                break  # the chain state changes after a trade; re-evaluate next block
+                if self.cfg.max_inflight <= 1 or self.cfg.mode not in ("live", "paper"):
+                    break  # the chain state changes after a trade; re-evaluate next block
+                busy |= pools
         for key in open_keys & self._open_gaps.keys():
             self._open_gaps[key][1] = block  # a verified gap is still there
         self._prev_logged = (self._prev_logged | keys) & open_keys

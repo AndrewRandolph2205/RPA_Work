@@ -478,6 +478,13 @@ settings of this bot.
 - **Ordering** (`ordering`, `priority_fee_share`, `extra_tx_cost_usd`): how the
   chain orders transactions within a block, the bid on fee-ordered chains,
   and any fixed per-transaction cost such as an L1 data fee.
+- **Learned bidding** (`bid_strategy = "learned"`, `bid_percentile`,
+  `bid_margin`): on fee-ordered chains, bid just above what the transactions
+  that took similar-sized gaps actually paid (seen in paper trading, and read
+  back from earlier `paper_trades*.csv` at startup), never more than
+  `priority_fee_share` would.
+- **Trades at once** (`max_inflight`): live and paper modes can have several
+  trades out together, as long as no two use the same pool.
 - **Other EVM chains:** see [Other chains](#other-chains-base-and-beyond).
 
 ## Tests

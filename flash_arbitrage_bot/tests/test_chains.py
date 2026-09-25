@@ -84,6 +84,12 @@ class PolygonTests(unittest.TestCase):
 
 
 class DryRunDiagnosisTests(unittest.TestCase):
+    def setUp(self):
+        logging.disable(logging.WARNING)
+
+    def tearDown(self):
+        logging.disable(logging.NOTSET)
+
     def test_paper_dry_run_drops_a_tax_token(self):
         from flasharb.simulator import Outcome
         from tests.test_flasharb import ARB
@@ -131,6 +137,92 @@ class ActivePoolDiscoveryTests(unittest.TestCase):
             raise RuntimeError("HTTP 403 forbidden")
         with self.assertRaises(RuntimeError):
             scan_log_addresses(get_logs, "0xtopic", 1, 10)
+
+
+class BidBookTests(unittest.TestCase):
+    def test_suggests_nothing_until_it_has_seen_enough(self):
+        from flasharb.bidding import BidBook
+        book = BidBook(percentile=0.75, margin=0.10, min_samples=3)
+        book.add(1.0, 100)
+        book.add(1.0, 200)
+        self.assertIsNone(book.suggest(1.0))
+        book.add(1.0, 300)
+        self.assertEqual(book.suggest(1.0), int(300 * 1.1) + 1)
+
+    def test_prefers_gaps_of_a_similar_size(self):
+        from flasharb.bidding import BidBook
+        book = BidBook(percentile=0.5, margin=0.0, min_samples=2)
+        for tip in (10, 12, 11):
+            book.add(0.2, tip)          # small gaps: small bids
+        for tip in (5000, 6000):
+            book.add(5.0, tip)          # big gaps: big bids
+        self.assertLess(book.suggest(0.25), 100)
+        self.assertGreater(book.suggest(4.0), 4000)
+
+    def test_seeds_from_paper_csv(self):
+        from flasharb.bidding import BidBook
+        tmp = tempfile.mkdtemp()
+        with open(f"{tmp}/paper_trades.csv", "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=["est_profit_usd", "est_flash_fee_usd", "winner_tip_gwei"])
+            w.writeheader()
+            w.writerow({"est_profit_usd": "0.5", "est_flash_fee_usd": "0", "winner_tip_gwei": "1819.09"})
+            w.writerow({"est_profit_usd": "0.5", "est_flash_fee_usd": "0", "winner_tip_gwei": ""})
+        book = BidBook()
+        self.assertEqual(book.load_paper_csvs(tmp), 1)
+        self.assertEqual(book.typical(), int(1819.09 * 1e9))
+
+    def test_learned_bid_is_cheaper_but_never_above_the_share(self):
+        cfg = make_config("live", tempfile.mkdtemp())
+        cfg.ordering, cfg.priority_fee_share, cfg.bid_strategy = "fee", 0.5, "learned"
+        bot = FlashBot(cfg, FakeChain([pool("a", WETH, USDC, E18, E18)]), FakeExecutor(), RiskManager(cfg.risk),
+                       Journal(cfg.log_dir))
+        opp = type("Opp", (), {"net_usd": 2.0, "profit_usd": 2.1, "fee_usd": 0.0})()
+        cfg.bid_strategy = "share"
+        share_wei, share_usd = bot._priority_fee(opp, {WETH: 2000.0})
+        cfg.bid_strategy = "learned"
+        for _ in range(5):
+            bot.bids.add(2.0, share_wei // 10)       # winners bid a tenth of our usual bid
+        cheap_wei, cheap_usd = bot._priority_fee(opp, {WETH: 2000.0})
+        self.assertLess(cheap_wei, share_wei // 5)
+        self.assertLess(cheap_usd, share_usd)
+        for _ in range(20):
+            bot.bids.add(2.0, share_wei * 10)        # winners bid far more than we can afford
+        capped_wei, _ = bot._priority_fee(opp, {WETH: 2000.0})
+        self.assertEqual(capped_wei, share_wei)
+
+
+class InFlightTests(unittest.TestCase):
+    def setUp(self):
+        logging.disable(logging.WARNING)
+        from tests.test_flasharb import ARB
+        self.tmp = tempfile.mkdtemp()
+        self.usd_cheap = pool("uc", WETH, USDC, 1000 * E18, 2_000_000 * E6, fee=500)
+        self.usd_dear = pool("ud", WETH, USDC, 1000 * E18, 2_050_000 * E6)
+        self.arb_cheap = pool("ac", WETH, ARB, 1000 * E18, 1_000_000 * E18, fee=500)
+        self.arb_dear = pool("ad", WETH, ARB, 1000 * E18, 1_050_000 * E18)
+
+    def tearDown(self):
+        logging.disable(logging.NOTSET)
+
+    def bot(self, max_inflight):
+        cfg = make_config("paper", self.tmp)
+        cfg.max_inflight, cfg.max_candidates_per_block = max_inflight, 6
+        chain = FakeChain([self.usd_cheap, self.usd_dear, self.arb_cheap, self.arb_dear])
+        chain.verify_route = verify_by_block()
+        return FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(self.tmp),
+                        paper=PaperTrader(chain, cfg, background=False))
+
+    def test_one_at_a_time_by_default(self):
+        bot = self.bot(1)
+        bot.step()
+        self.assertEqual(bot.stats.paper_orders, 1)
+
+    def test_trades_through_separate_pools_go_together(self):
+        bot = self.bot(3)
+        bot.step()
+        self.assertEqual(bot.stats.paper_orders, 2)   # the USDC gap and the ARB gap share no pool
+        pools = [set(p.address for p in o.route.pools) for o, _, _ in bot._inflight.values()]
+        self.assertFalse(pools[0] & pools[1])
 
 
 class HeadFeedTests(unittest.TestCase):
