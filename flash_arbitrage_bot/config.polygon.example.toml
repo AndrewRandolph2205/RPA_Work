@@ -88,6 +88,24 @@ CRV = "0x172370d5Cd63279eFa6d502DAB29171933a610AF"
 SUSHI = "0x0b3F868E0BE5597D5DB7fEB59E1CADBb0fdDa50a"
 QUICK = "0xB5C064F955D8e7F38fE0460C556a72987494eE17"
 GHST = "0x385Eeac5cB85A38A9a07A70c73e0a3271CfB54A7"
+# More established Polygon tokens (from memory: startup skips any address that
+# isn't a token and flags a symbol that doesn't match its name)
+stMATIC = "0x3A58a54C066FdC0f2D55FC9C89F0415C92eBf3C4"
+FRAX = "0x45c32fA6DF82ead1e2EF74d17b76547EDdFaFF89"
+EURA = "0xE0B52e49357Fd4DAf2c15e02058DCE6BC0057db4"
+axlUSDC = "0x750e4C4984a9e0f12978eA6742Bc1c5D248f40ed"
+GRT = "0x5fe2B58c013d7601147DcdD68C143A77499f5531"
+BAL = "0x9a71012B13CA4d3D0Cdc72A177DF3ef03b0E76A3"
+SNX = "0x50B728D8D964fd00C2d0AAD81718b71311feF68a"
+COMP = "0x8505b9d2254A7Ae468c0E9dd10Ccea3A837aef5c"
+LDO = "0xC3C7d422809852031b44ab29EEC9F1EfF2A58756"
+MKR = "0x6f7C932e7684666C9fd1d44527765433e01fF61d"
+KNC = "0x1C954E8fe737F99f68Fa1CCda3e51ebDB291948C"
+SAND = "0xBbba073C31bF03b8ACf7c28EF0738DeCF3695683"
+MANA = "0xA1c57f48F0Deb89f569dFbE6E2B7f46D33606fD4"
+TEL = "0xdF7837DE1F2Fa4631D716CF2502f8b230F1dcc32"
+GNS = "0xE5417Af564e4bFDA1c483642db72007871397896"
+VOXEL = "0xd0258a3fD00f38aa8090dfee343f10A9D4d30D3F"
 
 # ---- DEXes --------------------------------------------------------------------------
 # QuickSwap V3 runs the original Algebra ("algebra_v1": one dynamic fee for both
@@ -123,7 +141,7 @@ router_kind = "v2"
 fee = 3000
 
 [risk]
-min_profit_usd = 0.03           # low for a first scan: see which small gaps are real; raise before live
+min_profit_usd = 0.10           # paper trading showed gaps under $0.10 lose money overall (lost bids)
 max_loan_usd = 25000.0
 min_pool_liquidity_usd = 10000.0
 min_pool_reserve_usd = 2500.0
@@ -135,6 +153,6 @@ max_consecutive_reverts = 3
 enabled = true
 min_liquidity_usd = 10000.0
 max_tokens = 250
-max_pairs_per_factory = 30000
+max_pairs_per_factory = 150000   # all of QuickSwap V2's ~136k pairs: established tokens sit in the older ones
 cache_hours = 24
 cache_file = "logs_polygon/discovered_tokens.json"
