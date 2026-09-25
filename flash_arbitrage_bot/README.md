@@ -404,7 +404,7 @@ and whether closers pay high fees:
 
 ```bash
 cp config.base.example.toml config.base.toml
-# RPC_URL must point at Base, e.g. https://base-mainnet.g.alchemy.com/v2/<key>
+# add to .env: BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/<key>
 # (enable Base for the key in Alchemy's dashboard)
 python3 run_flash.py selftest --config config.base.toml
 python3 run_flash.py run --config config.base.toml

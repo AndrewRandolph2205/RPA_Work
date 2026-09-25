@@ -15,7 +15,7 @@
 #
 # Start in scan mode for a day: it's free, and the gap lifetimes and closers it
 # records say whether Base is less crowded than Arbitrum before anything else.
-# Needs RPC_URL for Base, e.g. https://base-mainnet.g.alchemy.com/v2/<key>
+# Needs BASE_RPC_URL in .env, e.g. https://base-mainnet.g.alchemy.com/v2/<key>
 # (enable Base for the key in Alchemy's dashboard).
 mode = "scan"
 
@@ -25,7 +25,7 @@ mode = "scan"
 # that doesn't answer. Double-check on https://basescan.org before going live.
 chain_name = "base"
 chain_id = 8453
-rpc_url_env = "RPC_URL"
+rpc_url_env = "BASE_RPC_URL"         # separate from Arbitrum's RPC_URL, so both configs work side by side
 balancer_vault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"   # Balancer V2, same address as on Arbitrum
 contract_address = ""
 owner_address = ""
@@ -43,7 +43,7 @@ log_dir = "logs_base"           # kept apart from Arbitrum's results
 # ---- Speed and ordering -------------------------------------------------------------
 sequencer_feed_url = ""         # none on Base
 state_source = "logs"           # pool events + newHeads over one websocket
-ws_rpc_url_env = "WS_RPC_URL"   # unset = RPC_URL with https:// -> wss://
+ws_rpc_url_env = "BASE_WS_RPC_URL"   # unset = BASE_RPC_URL with https:// -> wss://
 logs_settle_ms = 20
 logs_resync_s = 60
 exact_sim = true
