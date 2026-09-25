@@ -812,7 +812,7 @@ class FlashBot:
             self.journal.gap(route=route, first_block=first, last_block=last, closed_by_block=block,
                              blocks_open=lifetime, net_usd=round(net, 4), pools=" ".join(pools))
             log.info("gap closed after %d block(s) (~%.1fs; seen gone at block +%d): %s", lifetime,
-                     lifetime * 0.25, block - first, route)
+                     lifetime * self.cfg.paper_block_time_ms / 1000, block - first, route)
             if self.tracer is not None:
                 self.tracer.submit(GapRecord(route, pools, first, last, block, net))
 
@@ -856,7 +856,7 @@ class FlashBot:
                 life = sorted(s.gap_lifetimes)
                 quick = sum(1 for n in life if n <= 2)
                 lines.append(f"  verified gaps closed: {len(life)}; gone within 2 blocks: {quick}; "
-                             f"lasted 4+ blocks (1s+): {sum(1 for n in life if n >= 4)}; "
+                             f"lasted 4+ blocks ({4 * self.cfg.paper_block_time_ms / 1000:g}s+): {sum(1 for n in life if n >= 4)}; "
                              f"median {life[len(life) // 2]} blocks")
             traced = self.tracer.summary() if self.tracer is not None else None
             if traced:
