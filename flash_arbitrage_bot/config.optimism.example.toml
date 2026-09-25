@@ -1,0 +1,130 @@
+# Optimism (OP Mainnet). Copy to config.optimism.toml and run with:
+#   python run_flash.py run --config config.optimism.toml
+#
+# Built like Base (same OP-stack software), with less trading and probably
+# fewer bots. How it differs from Arbitrum, and what that means here:
+# - Blocks every 2s, not 0.25s.
+# - Inside a block the sequencer orders transactions by priority fee, not by
+#   arrival, so a trade is won by bidding, not by milliseconds (ordering = "fee").
+#   The closers' positions and priority fees (closers.csv, paper_trades.csv) show
+#   what really decides the race.
+# - Every transaction also pays a small L1 data fee (extra_tx_cost_usd).
+# - No Arbitrum-style sequencer feed: blocks are announced by the node's own
+#   newHeads over the same websocket that streams the pool events.
+#
+# Start in scan mode for a day: it's free, and the gap lifetimes and closers it
+# records say whether Optimism is less crowded before anything else.
+# Needs OP_RPC_URL in .env, e.g. https://opt-mainnet.g.alchemy.com/v2/<key>
+# (enable OP Mainnet for the key in Alchemy's dashboard).
+mode = "scan"
+
+# ---- Network: Optimism ------------------------------------------------------------
+# Addresses from memory: `python run_flash.py selftest --config config.optimism.toml`
+# checks every factory and router holds a contract, and startup skips any token
+# that doesn't answer. Double-check on https://optimistic.etherscan.io before going live.
+chain_name = "optimism"
+chain_id = 10
+rpc_url_env = "OP_RPC_URL"           # separate from the other chains' URLs, so all configs work side by side
+balancer_vault = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"   # Balancer V2, same address as on Arbitrum
+contract_address = ""
+owner_address = ""
+
+# ---- Bot behaviour ----------------------------------------------------------------
+max_hops = 3
+poll_interval_s = 0.25
+max_candidates_per_block = 3
+sim_cooldown_blocks = 5         # blocks are 8x longer than Arbitrum's
+gas_units_estimate = 450000
+route_rebuild_s = 3600
+summary_interval_s = 60
+log_dir = "logs_optimism"           # kept apart from Arbitrum's results
+
+# ---- Speed and ordering -------------------------------------------------------------
+sequencer_feed_url = ""         # none on Optimism
+state_source = "logs"           # pool events + newHeads over one websocket
+ws_rpc_url_env = "OP_WS_RPC_URL"     # unset = OP_RPC_URL with https:// -> wss://
+logs_settle_ms = 150            # OP-stack nodes send a block's events well after its newHeads; blocks are 2s
+logs_resync_s = 60
+exact_sim = true
+trace_closers = true
+ordering = "fee"                # highest priority fee first within a block
+priority_fee_share = 0.5        # bid half of each trade's expected profit above min_profit_usd
+extra_tx_cost_usd = 0.005       # L1 data fee per transaction (a few tenths of a cent)
+send_rpc_url = ""               # e.g. https://mainnet-sequencer.optimism.io to skip a hop (live mode)
+presimulate_live = false
+live_gas_limit = 2000000
+paper_send_latency_ms = 30
+paper_timeboost = "off"         # Timeboost is Arbitrum-only
+paper_timeboost_delay_ms = 0
+paper_block_time_ms = 2000
+paper_same_block_wins = false   # with ordering = "fee" the bids decide instead
+paper_gas_units = 0
+
+# ---- Tokens -----------------------------------------------------------------------
+native_wrapped = "WETH"
+stable_tokens = ["USDC", "USDC.e", "USDT", "DAI"]
+flash_tokens = ["WETH", "USDC"]
+
+[tokens]
+WETH = "0x4200000000000000000000000000000000000006"
+USDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
+"USDC.e" = "0x7F5c764cBc14f9669B88837ca1490cCa17c31607"
+USDT = "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58"
+DAI = "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"
+sUSD = "0x8c6f28f2F1A3C87F0f938b96d27520d9751ec8d9"
+LUSD = "0xc40F949F8a4e094D1b49a23ea9241D289B7b2819"
+FRAX = "0x2E3D870790dC77A83DD1d18184Acc7439A53f475"
+# Bitcoin and staked ETH
+WBTC = "0x68f180fcCe6836688e9084f035309E29Bf0A2095"
+wstETH = "0x1F32b1c2345538c0c6f582fCB022739c4A194Ebb"
+rETH = "0x9Bcef72be871e61ED4fBbc7630889beE758eb81D"
+weETH = "0x5A7fACB970D094B6C7FF1df0eA68D99E6e73CBFF"
+# Optimism ecosystem and DeFi
+OP = "0x4200000000000000000000000000000000000042"
+VELO = "0x9560e827aF36c94D2Ac33a39bCE1Fe78631088Db"
+SNX = "0x8700dAec35aF8Ff88c16BdF0418774CB3D7599B4"
+LINK = "0x350a791Bfc2C21F9Ed5d10980Dad2e2638ffa7f6"
+WLD = "0xdC6fF44d5d932Cbd77B52E5612Ba0529DC6226F1"
+
+# ---- DEXes --------------------------------------------------------------------------
+# "solidly" = Velodrome V2 (Optimism's largest DEX; Aerodrome is its Base copy):
+# volatile pools only, fee read from the factory. Velodrome's concentrated
+# "Slipstream" pools aren't supported yet. A DEX that finds 0 pools at startup
+# has a wrong address: check it on the explorer.
+[dexes.uniswap_v3]
+type = "v3"
+factory = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+router = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+router_kind = "v3_router02"
+fee_tiers = [100, 500, 3000, 10000]
+quoter = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+
+[dexes.uniswap_v2]
+type = "v2"
+factory = "0x0c3c1c532F1e39EdF36BE9Fe0bE1410313E074Bf"
+router = "0x4A7b5Da61326A6379179b40d00F57E5bbDC962c2"
+router_kind = "v2"
+fee = 3000
+
+[dexes.velodrome]
+type = "solidly"
+factory = "0xF1046053aa5682b4F9a81b5481394DA16BE5FF5a"
+router = "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858"
+router_kind = "solidly"
+
+[risk]
+min_profit_usd = 0.03           # low for a first scan: see which small gaps are real; raise before live
+max_loan_usd = 25000.0
+min_pool_liquidity_usd = 10000.0
+min_pool_reserve_usd = 2500.0
+max_gas_price_gwei = 0.5        # Optimism gas is usually well under 0.01 gwei
+max_daily_gas_usd = 5.0
+max_consecutive_reverts = 3
+
+[discovery]
+enabled = true
+min_liquidity_usd = 10000.0
+max_tokens = 250
+max_pairs_per_factory = 30000
+cache_hours = 24
+cache_file = "logs_optimism/discovered_tokens.json"

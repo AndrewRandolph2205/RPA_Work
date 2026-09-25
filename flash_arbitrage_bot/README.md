@@ -417,6 +417,11 @@ small player. If gaps close in the next block to large bids, Base is as
 crowded as Arbitrum. Live mode on Base needs its own deployment of
 `FlashArbitrage` (`deploy --config config.base.toml`).
 
+**Optimism** (`config.optimism.example.toml`) is set up the same way: Uniswap
+V2/V3 and Velodrome (Aerodrome's original, also `type = "solidly"`), results
+in `logs_optimism/`, RPC from `OP_RPC_URL`. It has less trading than Base and
+probably fewer bots; a day of scan mode on each compares them.
+
 **Adding another EVM chain** (newer chains have fewer bots, for a while):
 
 1. Copy a config and set `chain_id`, `chain_name`, `log_dir`, the tokens and
