@@ -34,7 +34,10 @@ _SIM_RESULT = "8340162e"    # SimResult(uint256,uint256[],uint256[])
 _HOP_FAILED = "81f89af4"    # HopFailed(uint256,bytes)
 _ERROR_STRING = "08c379a0"  # Error(string)
 _PANIC = "4e487b71"         # Panic(uint256)
-_CUSTOM_ERRORS = {"c4c321d1": "BadRoute", "14d4a4e8": "OnlySelf", "fecb69b4": "TokenCallFailed"}
+_CUSTOM_ERRORS = {"c4c321d1": "BadRoute", "14d4a4e8": "OnlySelf", "fecb69b4": "TokenCallFailed",
+                  # Solidly/Aerodrome pools' K(): like "UniswapV2: K", the pool got less than was sent
+                  "a932492f": "Solidly: K", "42301c23": "InsufficientOutputAmount",
+                  "bb55fd27": "InsufficientLiquidity"}
 
 V2_KINDS = V2_STYLE
 

@@ -14,7 +14,7 @@ from flasharb.bot import FlashBot
 from flasharb.journal import Journal
 from flasharb.risk import RiskManager
 from flasharb.routes import Route, find_cycles, flash_fee, optimal_input_from
-from flasharb.simulator import Outcome, diagnose, route_steps
+from flasharb.simulator import Outcome, diagnose, reason_text, route_steps
 from tests.test_flasharb import (ARB, E6, E18, USDC, WETH, FakeChain, exact_checker, hop_amounts,
                                  make_config, pool)
 
@@ -167,6 +167,8 @@ class DiagnoseTests(unittest.TestCase):
         failed = Outcome(E18, 7, "sim", failed_hop=1, reason="UniswapV2: K")
         d = diagnose(route, failed, None, SYMBOLS, self.core)
         self.assertEqual((d.cause, d.hop, d.taxed_token), ("transfer tax", 1, ARB))
+        aero = Outcome(E18, 7, "sim", failed_hop=1, reason=reason_text(bytes.fromhex("a932492f"), None))
+        self.assertEqual(diagnose(route, aero, None, SYMBOLS, self.core).taxed_token, ARB)  # Aerodrome's K()
         other = diagnose(route, Outcome(E18, 7, "sim", failed_hop=0, reason="SPL"), None, SYMBOLS, self.core)
         self.assertEqual(other.cause, "swap reverted")
         loan = diagnose(route, Outcome(E18, 7, "sim", failed_hop=-1, reason="BAL#528"), None, SYMBOLS, self.core)
