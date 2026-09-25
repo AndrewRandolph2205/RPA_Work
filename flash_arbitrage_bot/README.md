@@ -422,6 +422,19 @@ V2/V3 and Velodrome (Aerodrome's original, also `type = "solidly"`), results
 in `logs_optimism/`, RPC from `OP_RPC_URL`. It has less trading than Base and
 probably fewer bots; a day of scan mode on each compares them.
 
+**Polygon PoS** (`config.polygon.example.toml`): QuickSwap V2/V3, Uniswap V3
+and Sushi, results in `logs_polygon/`, RPC from `POLYGON_RPC_URL`. QuickSwap V3
+runs the original Algebra (`type = "algebra_v1"`: one dynamic fee for both
+directions). Gas is paid in POL, so `native_wrapped = "WPOL"`. Two things set it
+apart:
+
+- **A public mempool.** Other bots see a pending trade and can copy it with a
+  higher priority fee. The flash-loan contract reverts unless it profits, so a
+  copied trade costs only its gas (a fraction of a cent on Polygon), never the
+  loan. For live trading, point `send_rpc_url` at a private transaction relay.
+- **A minimum tip.** Validators drop transactions tipping under ~25–30 gwei,
+  so bids never go below `min_priority_fee_gwei`.
+
 **Adding another EVM chain** (newer chains have fewer bots, for a while):
 
 1. Copy a config and set `chain_id`, `chain_name`, `log_dir`, the tokens and
@@ -456,7 +469,8 @@ settings of this bot.
   DEXes. Gaps involving these are flagged, because some charge a hidden
   transfer tax that only simulate mode reveals.
 - **DEXes** (`[dexes.*]`): any Uniswap V2 fork, Uniswap V3 fork, Camelot-style
-  V2, Algebra-based V3 or Solidly/Velodrome V2 (Aerodrome); set `type`,
+  V2, Algebra-based V3 (Camelot's `algebra` or the original `algebra_v1`, e.g.
+  QuickSwap V3) or Solidly/Velodrome V2 (Aerodrome); set `type`,
   `router_kind` and (for concentrated liquidity) `quoter`.
 - **Risk** (`[risk]`): `min_profit_usd`, `min_pool_liquidity_usd`,
   `max_loan_usd`, gas price cap, daily reverted-gas budget, consecutive-revert

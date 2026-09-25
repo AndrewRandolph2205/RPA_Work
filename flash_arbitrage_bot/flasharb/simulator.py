@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Mapping, Optional, Set
 
-from .amm import ROUTER_KINDS, V2_STYLE
+from .amm import ALGEBRA, ROUTER_KINDS, V2_STYLE
 
 SIM_ADDRESS = "0xaB08D2CAAD0862E8699C93C90DDA71dABAc60cc8"  # keccak("flasharb.RouteSimulator")[12:]
 CALLER = "0x52816c0a4bBD59865D9Fed0557145126BBac6AF0"       # keccak("flasharb.RouteSimulator.caller")[12:]
@@ -174,7 +174,7 @@ def diagnose(route, full: Outcome, tiny: Optional[Outcome], symbols: Mapping[str
     if tiny_ratio is not None and tiny_ratio >= 0.9995:
         return Diagnosis("depth", i, f"{where}: {-shortfall:+.2%} at full size{at_tiny}: liquidity ends "
                          "before this size (the model treats the current range as endless)", None, shortfall)
-    what = "dynamic fee/price" if pool.kind == "algebra" else "fee/price"
+    what = "dynamic fee/price" if pool.kind in ALGEBRA else "fee/price"
     return Diagnosis(what, i, f"{where}: {-shortfall:+.2%} at full size{at_tiny}: the pool charged a "
                      "different fee or price than the model read", None, shortfall)
 

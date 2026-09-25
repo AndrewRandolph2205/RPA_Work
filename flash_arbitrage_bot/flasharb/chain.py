@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
 
 from . import discovery
-from .amm import V2_STYLE, Pool
+from .amm import ALGEBRA, CONCENTRATED, V2_STYLE, Pool
 from .logstate import LATEST, apply_event, drifted, pool_state
 from .config import Config
 from .routes import flash_fee, usd_prices
@@ -313,7 +313,7 @@ class Chain:
                     calls.append((dex.factory, get_volatile + self.encode(
                         ["address", "address", "bool"], [self.cs(t0), self.cs(t1), False])))
                     meta.append((dex, t0, t1, dex.fee))
-                elif dex.type == "algebra":  # one pool per pair, fee read each block
+                elif dex.type in ALGEBRA:  # one pool per pair, fee read each block
                     calls.append((dex.factory, pool_by_pair + pair))
                     meta.append((dex, t0, t1, 0))
                 else:
@@ -330,7 +330,7 @@ class Chain:
                 continue
             pools.append(Pool(address=address, dex=dex.name, kind=dex.type, token0=t0, token1=t1,
                               fee_ppm=fee, router=dex.router, router_kind=dex.router_kind,
-                              quoter=dex.quoter if dex.type in ("v3", "algebra") else ""))
+                              quoter=dex.quoter if dex.type in CONCENTRATED else ""))
         return self._read_solidly_fees(self._drop_stable_pairs(pools))
 
     def _read_solidly_fees(self, pools: List[Pool]) -> List[Pool]:
@@ -619,6 +619,12 @@ class Chain:
                     # Only the first two slot0 fields are read; forks differ after that.
                     sqrt_price, pool.tick = self.decode(["uint160", "int24"], state[:64])
                     pool.update_v3(sqrt_price, self.decode(["uint128"], liq)[0])
+                elif pool.kind == "algebra_v1":
+                    # Original Algebra (QuickSwap V3) globalState: price, tick, fee, ...
+                    # One fee for both directions, already in parts per million.
+                    sqrt_price, pool.tick, fee = self.decode(["uint160", "int24", "uint16"], state[:96])
+                    pool.update_v3(sqrt_price, self.decode(["uint128"], liq)[0])
+                    pool.fee_ppm, pool.fee1_ppm = fee, None
                 else:
                     # Algebra (Camelot V3) globalState: price, tick, feeZto, feeOtz, ...
                     # Fees are already in parts per million and differ by direction.

@@ -46,6 +46,43 @@ class SolidlyPoolTests(unittest.TestCase):
         self.assertIn("sync_solidly", TOPIC)
 
 
+class AlgebraV1Tests(unittest.TestCase):
+    """QuickSwap V3 (original Algebra): one dynamic fee for both directions."""
+
+    def test_single_fee_event(self):
+        p = pool("quick", WETH, USDC, E18, E18, kind="algebra_v1")
+        p.fee1_ppm = 999
+        entry = log_entry("fee_single", p.address, 5, 0, data=(450,))
+        self.assertTrue(apply_event(p, decode_log(entry, TOPICS)))
+        self.assertEqual((p.fee_for(WETH), p.fee_for(USDC)), (450, 450))
+        other = pool("camelot", WETH, USDC, E18, E18, kind="algebra")
+        apply_event(other, decode_log(log_entry("fee_single", other.address, 5, 0, data=(450,)), TOPICS))
+        self.assertNotEqual(other.fee_ppm, 450)   # Camelot's pools send the two-fee event instead
+
+    def test_is_concentrated_with_a_dynamic_fee(self):
+        p = pool("quick", WETH, USDC, E18, E18, kind="algebra_v1")
+        self.assertTrue(p.concentrated)
+        self.assertEqual(p.label, "quick")
+
+
+class PolygonTests(unittest.TestCase):
+    def test_example_config_loads(self):
+        from flasharb.config import load_config
+        cfg = load_config("config.polygon.example.toml")
+        self.assertEqual((cfg.chain_id, cfg.native_wrapped, cfg.ordering), (137, "WPOL", "fee"))
+        self.assertEqual(cfg.dexes["quickswap_v3"].type, "algebra_v1")
+
+    def test_bid_never_goes_below_the_network_minimum(self):
+        cfg = make_config("live", tempfile.mkdtemp())
+        cfg.ordering, cfg.priority_fee_share, cfg.min_priority_fee_gwei = "fee", 0.0, 30.0
+        bot = FlashBot(cfg, FakeChain([pool("a", WETH, USDC, E18, E18)]), FakeExecutor(), RiskManager(cfg.risk),
+                       Journal(cfg.log_dir))
+        opp = type("Opp", (), {"net_usd": 1.0})()
+        tip_wei, tip_usd = bot._priority_fee(opp, {WETH: 2000.0})
+        self.assertEqual(tip_wei, 30 * GWEI)
+        self.assertAlmostEqual(tip_usd, 30 * GWEI * cfg.gas_units_estimate / 1e18 * 2000.0)
+
+
 class HeadFeedTests(unittest.TestCase):
     def test_announces_the_nodes_heads(self):
         clock = FakeClock()

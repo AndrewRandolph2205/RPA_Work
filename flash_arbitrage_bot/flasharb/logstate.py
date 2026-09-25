@@ -49,6 +49,7 @@ EVENT_SIGNATURES = {
     "mint": "Mint(address,address,int24,int24,uint128,uint256,uint256)",
     "burn": "Burn(address,int24,int24,uint128,uint256,uint256)",
     "fee": "Fee(uint16,uint16)",                                  # Algebra, per-direction fees
+    "fee_single": "Fee(uint16)",                                  # original Algebra (QuickSwap V3), one fee
     "camelot_fee": "FeePercentUpdated(uint16,uint16)",           # Camelot V2, out of 100,000
 }
 # Known values, checked against keccak at startup (see event_topics).
@@ -126,6 +127,8 @@ def decode_log(entry: dict, topics: Dict[str, str]) -> Optional[Event]:
         elif kind == "burn":  # topics: owner, tickLower, tickUpper; data: amount, amount0, amount1
             values = (_int(bytes.fromhex(raw_topics[2][2:])), _int(bytes.fromhex(raw_topics[3][2:])),
                       _uint(words[0]), _uint(words[1]), _uint(words[2]))
+        elif kind == "fee_single":
+            values = (_uint(words[0]),)
         else:  # fee / camelot_fee: two uint16
             values = (_uint(words[0]), _uint(words[1]))
         return Event(kind, entry["address"].lower(), _hex_int(entry["blockNumber"]),
@@ -148,6 +151,9 @@ def apply_event(pool, event: Event) -> bool:
     elif kind == "fee":
         if pool.kind == "algebra":
             pool.fee_ppm, pool.fee1_ppm = v[0], v[1]
+    elif kind == "fee_single":
+        if pool.kind == "algebra_v1":
+            pool.fee_ppm, pool.fee1_ppm = v[0], None
     elif not pool.concentrated:
         return True
     elif kind == "swap":

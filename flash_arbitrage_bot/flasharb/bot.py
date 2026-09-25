@@ -356,9 +356,14 @@ class FlashBot:
             return 0, 0.0
         tip_usd = self.cfg.priority_fee_share * max(0.0, opp.net_usd - self.cfg.risk.min_profit_usd)
         eth_usd = prices.get(self.native, 0.0)
-        if tip_usd <= 0 or eth_usd <= 0:
+        if eth_usd <= 0:
             return 0, 0.0
-        return int(tip_usd / eth_usd * 1e18 / self.cfg.gas_units_estimate), tip_usd
+        tip_wei = int(tip_usd / eth_usd * 1e18 / self.cfg.gas_units_estimate)
+        floor = int(self.cfg.min_priority_fee_gwei * 1e9)
+        if tip_wei < floor:  # the network's minimum tip: the bid can't go below it
+            tip_wei = floor
+            tip_usd = floor * self.cfg.gas_units_estimate / 1e18 * eth_usd
+        return tip_wei, tip_usd
 
     def _act(self, opp: Opportunity, prices: Dict[str, float]) -> bool:
         """Simulate mode: dry-run the trade. Live mode: send it. Returns True when a

@@ -229,7 +229,7 @@ def check_simulator(chain, cfg, block) -> bool:
     loss = 1 - outcome.out / amount
     how = ("RouteSimulator via eth_call state override" if outcome.method == "sim" else
            "quoter contracts (this RPC doesn't support state overrides; transfer taxes go unseen)")
-    print(f"  [ OK ] exact checks use {how}: 0.01 WETH round trip through {pool.label} "
+    print(f"  [ OK ] exact checks use {how}: 0.01 {cfg.native_wrapped} round trip through {pool.label} "
           f"lost {loss:.2%} (pool fees)")
     return True
 

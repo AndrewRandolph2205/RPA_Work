@@ -78,6 +78,9 @@ class Config:
     # "fee" chains: offer this share of each trade's expected profit above
     # min_profit_usd as priority fee (0 = no bid; 1 = give it all away).
     priority_fee_share: float = 0.5
+    # "fee" chains: never bid less than this per gas (Polygon's validators drop
+    # transactions tipping under ~25-30 gwei).
+    min_priority_fee_gwei: float = 0.0
     # A fixed cost per transaction on top of L2 gas, e.g. the L1 data fee every
     # OP-stack transaction pays (a few tenths of a cent on Base).
     extra_tx_cost_usd: float = 0.0
@@ -207,6 +210,8 @@ def validate(cfg: Config) -> None:
         raise ValueError(f"ordering must be one of {ORDERINGS}, got {cfg.ordering!r}")
     if not 0 <= cfg.priority_fee_share <= 1:
         raise ValueError("priority_fee_share must be between 0 and 1")
+    if cfg.min_priority_fee_gwei < 0:
+        raise ValueError("min_priority_fee_gwei can't be negative")
     if cfg.extra_tx_cost_usd < 0:
         raise ValueError("extra_tx_cost_usd can't be negative")
     if cfg.logs_settle_ms < 0 or cfg.logs_resync_s <= 0:

@@ -21,14 +21,17 @@ FEE_DENOMINATOR = 1_000_000  # fees are in parts per million: 3000 = 0.30%
 ROUTER_KINDS = {"v2": 0, "v3_router02": 1, "v3_router": 2, "camelot_v2": 3, "algebra": 4, "solidly": 5}
 
 # Pool types. "camelot_v2" is a V2-style pair with per-direction fees;
-# "algebra" is Camelot V3 (concentrated liquidity, one pool per pair, dynamic fees);
+# "algebra" is Camelot V3 (concentrated liquidity, one pool per pair, dynamic fees
+# that differ by direction); "algebra_v1" is the original Algebra (QuickSwap V3 on
+# Polygon): the same, with one dynamic fee for both directions;
 # "solidly" is a Solidly/Velodrome V2 volatile pool (Aerodrome on Base): constant
 # product, fee set per pool by the factory. Their "stable" pools use another curve
 # and are never discovered.
-POOL_TYPES = ("v2", "v3", "camelot_v2", "algebra", "solidly")
+POOL_TYPES = ("v2", "v3", "camelot_v2", "algebra", "algebra_v1", "solidly")
 V2_STYLE = ("v2", "camelot_v2", "solidly")   # reserves from getReserves(), constant-product math
-CONCENTRATED = ("v3", "algebra")
-DYNAMIC_FEE = ("camelot_v2", "algebra")
+ALGEBRA = ("algebra", "algebra_v1")
+CONCENTRATED = ("v3",) + ALGEBRA
+DYNAMIC_FEE = ("camelot_v2",) + ALGEBRA
 
 
 @dataclass(eq=False)
