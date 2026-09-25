@@ -44,7 +44,7 @@ log_dir = "logs_base"           # kept apart from Arbitrum's results
 sequencer_feed_url = ""         # none on Base
 state_source = "logs"           # pool events + newHeads over one websocket
 ws_rpc_url_env = "BASE_WS_RPC_URL"   # unset = BASE_RPC_URL with https:// -> wss://
-logs_settle_ms = 20
+logs_settle_ms = 150            # Base nodes send a block's events well after its newHeads; blocks are 2s
 logs_resync_s = 60
 exact_sim = true
 trace_closers = true

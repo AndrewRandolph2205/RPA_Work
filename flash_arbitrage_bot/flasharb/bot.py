@@ -913,7 +913,9 @@ class FlashBot:
         feed = self.feed
         if feed is None or self._feed_given_up or not feed.healthy():
             return False
-        if self._feed_ok or getattr(feed, "trusted", False):  # the node's own heads need no check
+        if getattr(feed, "trusted", False):  # the node's own heads need no check
+            self._feed_ok = True
+        if self._feed_ok:
             return True
         now = self._clock()
         if now - self._feed_checked_at < 2.0:
