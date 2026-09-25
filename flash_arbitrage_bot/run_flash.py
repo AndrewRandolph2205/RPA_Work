@@ -413,8 +413,11 @@ def main() -> int:
     try:
         cfg = load_config(args.config)
     except FileNotFoundError:
+        example = Path(args.config).name.replace(".toml", ".example.toml")
+        if not (HERE / example).exists():
+            example = "config.example.toml"
         print(f"Config file not found: {args.config}\nCreate one from the example first:\n"
-              "  cp config.example.toml config.toml")
+              f"  cp {example} {args.config}")
         return 2
     except ValueError as exc:
         print(f"Problem in {args.config}: {exc}")
