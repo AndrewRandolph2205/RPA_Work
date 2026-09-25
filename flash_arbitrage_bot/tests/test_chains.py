@@ -83,6 +83,31 @@ class PolygonTests(unittest.TestCase):
         self.assertAlmostEqual(tip_usd, 30 * GWEI * cfg.gas_units_estimate / 1e18 * 2000.0)
 
 
+class DryRunDiagnosisTests(unittest.TestCase):
+    def test_paper_dry_run_drops_a_tax_token(self):
+        from flasharb.simulator import Outcome
+        from tests.test_flasharb import ARB
+        tmp = tempfile.mkdtemp()
+        cfg = make_config("paper", tmp)
+        cfg.presimulate_live = True
+        a = pool("a", WETH, ARB, 1000 * E18, 1_000_000 * E18, fee=500)
+        b = pool("b", WETH, ARB, 1000 * E18, 1_050_000 * E18)
+        priced = pool("usd", WETH, USDC, 1000 * E18, 2_000_000 * E6)   # prices WETH in dollars
+        chain = FakeChain([a, b, priced])
+        chain.discovered = {ARB}
+
+        def verify(route, sizes, block):   # ARB never arrives in full: the next hop reverts with K
+            return [Outcome(x, block, "sim", [route.amount_out(x)], failed_hop=1, reason="UniswapV2: K")
+                    for x in sizes]
+        chain.verify_route = verify
+        bot = FlashBot(cfg, chain, None, RiskManager(cfg.risk), Journal(tmp),
+                       paper=PaperTrader(chain, cfg, background=False))
+        bot.step()
+        self.assertIn(ARB, bot.excluded)
+        self.assertEqual(bot.stats.paper_orders, 0)
+        self.assertIn("excluded transfer-tax tokens", bot.summary())
+
+
 class HeadFeedTests(unittest.TestCase):
     def test_announces_the_nodes_heads(self):
         clock = FakeClock()

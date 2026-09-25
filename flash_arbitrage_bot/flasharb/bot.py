@@ -385,6 +385,7 @@ class FlashBot:
             if amount is None:
                 self.stats.sim_failed += 1
                 self._log_opportunity(opp, f"simulation failed: {sim.error}")
+                self._check_miss(opp)
                 return False
             self.stats.sim_passed += 1
             if self.cfg.mode == "simulate":
@@ -500,12 +501,16 @@ class FlashBot:
         if verify is None:
             return opp.amount_in
         sizes = [a for a in (opp.amount_in, opp.amount_in // 2, opp.amount_in // 4) if a > 0]
+        tiny = max(1, opp.amount_in // 1000)  # only for working out why, if every size fails
         try:
-            outcomes = verify(opp.route, sizes, self.last_block)
+            *outcomes, tiny_outcome = verify(opp.route, sizes + [tiny], self.last_block)
         except Exception as exc:
             log.warning("paper dry run failed: %s", describe(exc))
             return None
-        return next((o.amount_in for o in outcomes if o.ok and o.profit_raw >= min_profit_raw), None)
+        passed = next((o.amount_in for o in outcomes if o.ok and o.profit_raw >= min_profit_raw), None)
+        if passed is None:
+            self._learn_from_miss(opp.route, outcomes[0], tiny_outcome)
+        return passed
 
     def _paper_order(self, opp: Opportunity, prices: Dict[str, float], min_profit_raw: int,
                      tip_wei: int = 0, tip_usd: float = 0.0) -> bool:
@@ -718,15 +723,34 @@ class FlashBot:
             self.journal.check(**row, result="verified", cause="", hop="", detail="")
             return f"{tag}: net ${best_net:.2f} at {self._fmt_amount(opp, best.amount_in)}", True, best_net
         s.quoter_rejected += 1
-        d = diagnose(route, outcomes[0], tiny_outcome, self.symbols, self.core)
-        s.reject_causes[f"{d.cause} @ {route.pools[d.hop].dex}" if d.hop is not None else d.cause] += 1
-        if d.taxed_token and d.shortfall >= TAX_EXCLUDE_MIN and \
-                d.taxed_token in getattr(self.chain, "discovered", set()):
-            self._exclude_token(d.taxed_token, d.detail)
+        d = self._learn_from_miss(route, outcomes[0], tiny_outcome)
         self.journal.check(**row, result="model error", cause=d.cause,
                            hop="" if d.hop is None else d.hop + 1, detail=d.detail)
         return (f"rejected ({d.cause}): real net ${best_net:.2f} (estimate was ${opp.net_usd:.2f}); {d.detail}",
                 False, best_net)
+
+    def _learn_from_miss(self, route, full, tiny):
+        """Why an exact check came in under the estimate; a long-tail token that
+        turns out to tax transfers is dropped from every route."""
+        d = diagnose(route, full, tiny, self.symbols, self.core)
+        self.stats.reject_causes[f"{d.cause} @ {route.pools[d.hop].dex}" if d.hop is not None else d.cause] += 1
+        if d.taxed_token and d.shortfall >= TAX_EXCLUDE_MIN and \
+                d.taxed_token in getattr(self.chain, "discovered", set()):
+            self._exclude_token(d.taxed_token, d.detail)
+        return d
+
+    def _check_miss(self, opp: Opportunity) -> None:
+        """A dry run failed without saying why (live mode's estimate_gas): ask the
+        exact check, so transfer-tax tokens get dropped here too."""
+        verify = getattr(self.chain, "verify_route", None)
+        if verify is None:
+            return
+        try:
+            full, tiny = verify(opp.route, [opp.amount_in, max(1, opp.amount_in // 1000)], self.last_block)
+        except Exception as exc:
+            log.debug("diagnosing a failed dry run: %s", describe(exc))
+            return
+        self._learn_from_miss(opp.route, full, tiny)
 
     # ----- loop -------------------------------------------------------------
 
@@ -866,6 +890,12 @@ class FlashBot:
                          f"it wouldn't)")
         if self.cfg.mode != "scan" and (self.cfg.mode == "simulate" or self.cfg.presimulate_live):
             lines.append(f"  simulations passed={s.sim_passed} failed={s.sim_failed}")
+            if self.cfg.mode != "scan" and s.reject_causes:
+                causes = ", ".join(f"{cause} {n}" for cause, n in s.reject_causes.most_common(6))
+                lines.append(f"    why dry runs failed (since start): {causes}")
+            if self.cfg.mode != "scan" and self.excluded:
+                names = ", ".join(self.symbols.get(t, t[:10]) for t in self.excluded)
+                lines.append(f"    excluded transfer-tax tokens: {names}")
         if self.cfg.mode == "simulate":
             lines.append(f"  would-have-made net=${s.simulated_net_usd:.2f} "
                          f"(${s.simulated_net_usd / hours:.2f}/hr, optimistic)")
