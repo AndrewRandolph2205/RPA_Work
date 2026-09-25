@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
+from .closers import first_taker
 from .errors import describe
 from .routes import Route, to_usd
 
@@ -112,6 +113,16 @@ class PaperFill:
     landing_profit_usd: Optional[float] = None   # exact, on the state it landed on
     open_after_landing: Optional[bool] = None    # did the gap still pay after the landing block?
     zero_delay_net_usd: Optional[float] = None   # net for a bot with no delay at all
+    # The transaction that took the gap instead (lost races and gaps closed before
+    # landing), from first_taker(). Its position counts user transactions only:
+    # every Arbitrum block starts with ArbOS's own transaction at index 0.
+    winner: Optional[Dict] = None
+    winner_block_txs: Optional[int] = None       # user transactions in the winner's block
+
+    @property
+    def winner_position(self) -> Optional[int]:
+        """1 = the first user transaction in its block."""
+        return None if self.winner is None else max(1, self.winner["index"])
 
     @property
     def success(self) -> bool:
@@ -226,6 +237,26 @@ class PaperTrader:
     def _usd(self, order: PaperOrder, amount_raw: int) -> float:
         return to_usd(amount_raw, order.route.start, order.prices, self.chain.decimals)
 
+    def _find_winner(self, fill: PaperFill, lo: int, hi: int) -> None:
+        """Who took the gap, and how early in its block (best effort)."""
+        if not hasattr(self.chain, "logs_for"):
+            return
+        try:
+            winner = first_taker(self.chain, [p.address for p in fill.order.route.pools], lo, hi)
+            if winner is None:
+                return
+            count = getattr(self.chain, "block_tx_count", None)
+            total = count(winner["block"]) if count is not None else None
+        except Exception as exc:
+            log.debug("paper: couldn't look up who took the gap: %s", describe(exc))
+            return
+        fill.winner = winner
+        fill.winner_block_txs = None if total is None else max(1, total - 1)
+        of = f" of {fill.winner_block_txs}" if fill.winner_block_txs else ""
+        fill.reason += (f"; taken by {winner['tx_hash']} ({winner['kind']}, to {winner['to'] or '?'}"
+                        f"{', EXPRESS LANE' if winner['timeboosted'] else ''}), transaction "
+                        f"{fill.winner_position}{of} in block {winner['block']}")
+
     def settle(self, order: PaperOrder) -> PaperFill:
         """Run the order on the chain states around its landing block."""
         spot, land = order.detect_block, order.landing_block
@@ -275,6 +306,10 @@ class PaperTrader:
                             else f"a revert ({spotted.reason})")
             fill.reason = (f"never paid: the exact check at block {spot} gave {spotted_text} against a floor "
                            f"of ${floor_usd:.4f}; the fast estimate was off")
+        if fill.status == LOST:
+            self._find_winner(fill, land, land)
+        elif fill.cause == "closed before landing" and land - 1 > spot:
+            self._find_winner(fill, spot + 1, land - 1)
         if order.blocks_behind:
             fill.reason += (f"; the chain was already {order.blocks_behind} block(s) past block {spot} "
                             "when this was decided")

@@ -112,6 +112,37 @@ class PaperModeTests(unittest.TestCase):
         self.assertAlmostEqual(bot.stats.paper_net_usd, net, places=3)
         self.assertFalse(bot._inflight)
 
+    def test_lost_race_names_the_winner_and_its_position(self):
+        bot = self.bot(verify_by_block(gone_from=102))   # pays going into 102, gone by its end
+        a, b = self.cheap.address, self.dear.address
+        log = lambda addr, idx, tx: {"blockNumber": hex(102), "transactionIndex": hex(idx),  # noqa: E731
+                                     "logIndex": "0x0", "transactionHash": tx, "address": addr}
+        bot.chain.logs_for = lambda pools, lo, hi: [log(a, 2, "0xsolo"), log(a, 3, "0xarb"), log(b, 3, "0xarb")]
+        bot.chain.receipt_raw = lambda h: {"from": "0xme", "to": "0xbot", "timeboosted": False}
+        bot.chain.block_tx_count = lambda n: 9                   # ArbOS's own + 8 user transactions
+        bot.step()
+        bot.step()
+        row = self.rows()[0]
+        self.assertEqual(row["status"], "lost_race")
+        self.assertEqual((row["winner_tx"], row["winner_position"], row["winner_block_txs"], row["winner_to"]),
+                         ("0xarb", "3", "8", "0xbot"))
+        self.assertEqual((row["winner_kind"], row["winner_timeboosted"]), ("arbitrage (2+ route pools)", "False"))
+        self.assertEqual(row["our_ms_into_block"], "230")
+        self.assertIn("transaction 3 of 8 in block 102", row["reason"])
+        self.assertIn("winner was among the first 2 transactions of its block in 0 of 1; positions: 3/8",
+                      bot.summary())
+
+    def test_winner_lookup_failure_still_settles(self):
+        bot = self.bot(verify_by_block(gone_from=102))
+
+        def broken(*args):
+            raise RuntimeError("eth_getLogs: rate limited")
+        bot.chain.logs_for = broken
+        bot.step()
+        bot.step()
+        row = self.rows()[0]
+        self.assertEqual((row["status"], row["winner_tx"]), ("lost_race", ""))
+
     def test_gap_that_closes_before_landing_reverts_and_costs_gas(self):
         # 10 + 100 + 200 = 310ms: lands two blocks later (103); the gap is gone from block 102.
         bot = self.bot(verify_by_block(gone_from=102), send_ms=100.0)
@@ -264,8 +295,8 @@ class PaperModeTests(unittest.TestCase):
         bot.step()
         row = self.rows()[0]
         self.assertEqual(list(row), Journal.PAPER_FIELDS)
-        blank = [k for k, v in row.items() if v == ""]
-        self.assertEqual(blank, [])   # a filled trade has every column
+        blank = [k for k, v in row.items() if v == "" and not k.startswith("winner_")]
+        self.assertEqual(blank, [])   # a filled trade has every column (no winner: it won)
 
     def test_a_bot_behind_the_chain_lands_after_the_chains_head(self):
         # The feed timing says the block just appeared, but the RPC is already 10

@@ -100,6 +100,7 @@ class Stats:
     paper_zero_delay_net_usd: float = 0.0  # the same trades with no delay at all
     paper_would_halt: int = 0          # times live mode's revert limit would have stopped the bot
     paper_causes: Counter = field(default_factory=Counter)  # why paper trades didn't fill
+    paper_winner_positions: List[Tuple[int, Optional[int]]] = field(default_factory=list)  # lost races
     paper_express: Counter = field(default_factory=Counter)  # express lane's state at each order
     paper_decision_ms: List[float] = field(default_factory=list)
     paper_delay_ms: List[float] = field(default_factory=list)
@@ -555,6 +556,8 @@ class FlashBot:
                 s.paper_zero_delay_net_usd += fill.zero_delay_net_usd or 0.0
                 if not fill.success:
                     s.paper_causes[fill.cause] += 1
+                if fill.status == "lost_race" and fill.winner is not None:
+                    s.paper_winner_positions.append((fill.winner_position, fill.winner_block_txs))
                 # Live mode's limits see paper results too. Its revert limit would stop
                 # the bot; paper mode notes that and carries on collecting data.
                 self.risk.record_send(fill.success, fill.gas_usd)
@@ -578,6 +581,7 @@ class FlashBot:
         usd = lambda raw: to_usd(raw, start, o.prices, dec)  # noqa: E731
         rnd = lambda v, n=4: "" if v is None else round(v, n)  # noqa: E731
         settled = s.paper_filled + s.paper_reverted + s.paper_lost
+        w = fill.winner or {}
         return dict(
             paper_id=o.paper_id, status=fill.status, cause=fill.cause, route=o.route_desc,
             pools=" ".join(p.address for p in o.route.pools), amount_in=amount(o.amount_in),
@@ -596,6 +600,13 @@ class FlashBot:
             flash_fee_usd=rnd(fill.flash_fee_usd), gas_units=o.gas_units, gas_price_gwei=rnd(o.gas_price_wei / 1e9, 6),
             gas_usd=rnd(fill.gas_usd), net_usd=rnd(fill.net_usd), zero_delay_net_usd=rnd(fill.zero_delay_net_usd),
             latency_cost_usd=rnd(fill.latency_cost_usd), check_method=fill.method, reason=fill.reason,
+            winner_block=w.get("block", ""), winner_position=fill.winner_position or "",
+            winner_block_txs=fill.winner_block_txs or "", winner_tx=w.get("tx_hash", ""), winner_to=w.get("to", ""),
+            winner_timeboosted="" if w.get("timeboosted") is None else w["timeboosted"],
+            winner_kind=w.get("kind", ""),
+            # Roughly how far into the landing block's 250ms window this trade would
+            # have reached the sequencer (transactions are ordered by arrival).
+            our_ms_into_block=round(o.delay_ms - (o.blocks_late - 1) * self.cfg.paper_block_time_ms),
             cum_orders=s.paper_orders, cum_settled=settled, cum_filled=s.paper_filled,
             cum_net_usd=rnd(s.paper_net_usd), cum_gas_usd=rnd(s.paper_gas_usd),
             fill_rate=rnd(s.paper_filled / settled, 3) if settled else "")
@@ -627,6 +638,11 @@ class FlashBot:
         if s.paper_causes:
             causes = ", ".join(f"{cause} {n}" for cause, n in s.paper_causes.most_common(5))
             lines.append(f"    why paper trades didn't fill (since start): {causes}")
+        if s.paper_winner_positions:
+            first_two = sum(1 for pos, _ in s.paper_winner_positions if pos <= 2)
+            shown = ", ".join(f"{pos}/{n}" if n else f"{pos}" for pos, n in s.paper_winner_positions[-8:])
+            lines.append(f"    lost races (since start): the winner was among the first 2 transactions of its "
+                         f"block in {first_two} of {len(s.paper_winner_positions)}; positions: {shown}")
         if s.paper_would_halt:
             lines.append(f"    live mode would have halted {s.paper_would_halt}x "
                          f"({cfg.risk.max_consecutive_reverts} reverts in a row); paper mode kept going")

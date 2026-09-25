@@ -46,6 +46,32 @@ def _flag(value) -> Optional[bool]:
     return None
 
 
+def first_taker(chain, pools, lo: int, hi: int) -> Optional[Dict]:
+    """The first transaction in blocks lo..hi that traded through the route's
+    pools: preferably one through 2+ of them (an arbitrage), else the first
+    trade through any. None when nothing touched them."""
+    pools = {p.lower() for p in pools}
+    txs: "OrderedDict[str, Dict]" = OrderedDict()
+    order = lambda e: (int(e["blockNumber"], 16), int(e["transactionIndex"], 16),  # noqa: E731
+                       int(e.get("logIndex", "0x0"), 16))
+    for entry in sorted(chain.logs_for(sorted(pools), lo, hi), key=order):
+        info = txs.setdefault(entry["transactionHash"], {"block": int(entry["blockNumber"], 16),
+                                                          "index": int(entry["transactionIndex"], 16),
+                                                          "pools": set()})
+        info["pools"].add(entry["address"].lower())
+    if not txs:
+        return None
+    tx_hash = next((h for h, i in txs.items() if len(i["pools"] & pools) >= 2), next(iter(txs)))
+    info = txs[tx_hash]
+    receipt = chain.receipt_raw(tx_hash) or {}
+    touched = len(info["pools"] & pools)
+    return {"tx_hash": tx_hash, "block": info["block"], "index": info["index"], "txs_in_window": len(txs),
+            "from": receipt.get("from") or "", "to": receipt.get("to") or "",
+            "timeboosted": _flag(receipt.get("timeboosted")), "touched": touched, "of": len(pools),
+            "gas_used": int(receipt["gasUsed"], 16) if receipt.get("gasUsed") else "",
+            "kind": "arbitrage (2+ route pools)" if touched >= 2 else "single-pool trade"}
+
+
 class CloserTracer:
     def __init__(self, chain, journal, max_blocks: int = 50):
         self.chain = chain
@@ -90,34 +116,18 @@ class CloserTracer:
     def trace(self, gap: GapRecord) -> Dict:
         lo = gap.last_open + 1
         hi = min(max(lo, gap.closed_by), lo + self.max_blocks - 1)
-        pools = {p.lower() for p in gap.pools}
-        txs: "OrderedDict[str, Dict]" = OrderedDict()
-        entries = self.chain.logs_for(sorted(pools), lo, hi)
-        order = lambda e: (int(e["blockNumber"], 16), int(e["transactionIndex"], 16),  # noqa: E731
-                           int(e.get("logIndex", "0x0"), 16))
-        for entry in sorted(entries, key=order):
-            info = txs.setdefault(entry["transactionHash"], {"block": int(entry["blockNumber"], 16),
-                                                              "index": int(entry["transactionIndex"], 16),
-                                                              "pools": set()})
-            info["pools"].add(entry["address"].lower())
-        row = self._base(gap)
-        row["txs_in_window"] = len(txs)
-        if not txs:
-            row["kind"] = "no transaction touched the route's pools (the estimate moved, not the pools)"
-            return row
         # The first transaction through 2+ of the route's pools is the arbitrage
         # that closed it; failing that, the first trade through any of them.
-        closer = next((h for h, i in txs.items() if len(i["pools"] & pools) >= 2), next(iter(txs)))
-        info = txs[closer]
-        receipt = self.chain.receipt_raw(closer) or {}
-        touched = len(info["pools"] & pools)
+        taker = first_taker(self.chain, gap.pools, lo, hi)
+        row = self._base(gap)
+        if taker is None:
+            row["kind"] = "no transaction touched the route's pools (the estimate moved, not the pools)"
+            return row
         row.update({
-            "closer_block": info["block"], "blocks_after_last_open": info["block"] - gap.last_open,
-            "tx_index": info["index"], "tx_hash": closer, "from": receipt.get("from") or "",
-            "to": receipt.get("to") or "", "timeboosted": _flag(receipt.get("timeboosted")),
-            "pools_touched": f"{touched}/{len(pools)}",
-            "gas_used": int(receipt["gasUsed"], 16) if receipt.get("gasUsed") else "",
-            "kind": "arbitrage (2+ route pools)" if touched >= 2 else "single-pool trade",
+            "closer_block": taker["block"], "blocks_after_last_open": taker["block"] - gap.last_open,
+            "tx_index": taker["index"], "tx_hash": taker["tx_hash"], "from": taker["from"], "to": taker["to"],
+            "timeboosted": taker["timeboosted"], "pools_touched": f"{taker['touched']}/{taker['of']}",
+            "txs_in_window": taker["txs_in_window"], "gas_used": taker["gas_used"], "kind": taker["kind"],
         })
         if row["timeboosted"] is None:
             row["timeboosted"] = ""  # receipt had no timeboosted field

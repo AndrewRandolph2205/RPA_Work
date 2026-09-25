@@ -441,6 +441,10 @@ class Chain:
         block = self._result("eth_getBlockByNumber", [hex(number), False])
         return block.get("hash") if block else None
 
+    def block_tx_count(self, number: int) -> Optional[int]:
+        count = self._result("eth_getBlockTransactionCountByNumber", [hex(number)])
+        return None if count is None else int(count, 16)
+
     def block_number_by_hash(self, block_hash: str) -> Optional[int]:
         block = self._result("eth_getBlockByHash", [block_hash, False])
         return int(block["number"], 16) if block else None

@@ -30,6 +30,8 @@ class Journal:
                     "exact_profit_at_detect_usd", "exact_profit_at_landing_usd", "open_after_landing",
                     "amount_out", "profit_usd", "flash_fee_usd", "gas_units", "gas_price_gwei", "gas_usd",
                     "net_usd", "zero_delay_net_usd", "latency_cost_usd", "check_method", "reason",
+                    "winner_block", "winner_position", "winner_block_txs", "winner_tx", "winner_to",
+                    "winner_timeboosted", "winner_kind", "our_ms_into_block",
                     "cum_orders", "cum_settled", "cum_filled", "cum_net_usd", "cum_gas_usd", "fill_rate"]
 
     def __init__(self, log_dir: str):
